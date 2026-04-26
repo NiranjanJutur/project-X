@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Project X Tracker",
+    "slug": "project-x-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0b0e1a"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0e1a"
+      },
+      "package": "com.projectx.tracker"
+    },
+  }
+}
