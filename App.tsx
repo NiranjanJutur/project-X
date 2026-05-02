@@ -1,9 +1,9 @@
 import React from 'react';
-import { StyleSheet, View, Text, SafeAreaView, StatusBar, Platform } from 'react-native';
+import { StyleSheet, View, Text, SafeAreaView, StatusBar } from 'react-native';
 import { WebView } from 'react-native-webview';
 
 // In a real development environment, you would use your local IP address
-const VITE_DEV_SERVER_URL = 'http://192.168.1.101:5173/'; 
+const VITE_DEV_SERVER_URL = 'http://192.168.1.103:5173/'; 
 
 export default function App() {
   return (

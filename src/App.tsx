@@ -6,8 +6,19 @@ type EntryType = 'expense' | 'income'
 type RangeKey = 'today' | 'week' | 'month' | 'all'
 type TypeFilter = 'all' | EntryType
 type AppView = 'dashboard' | 'add' | 'activity' | 'goals' | 'investments'
-type InvestmentView = 'stocks' | 'mf' | 'nps' | 'ppf' | 'fd' | 'rd'
+type InvestmentView = 'stocks' | 'mf' | 'nps' | 'ppf' | 'fd' | 'rd' | 'subscriptions'
 type MfType = 'sip' | 'one-time'
+
+type SubscriptionFrequency = 'monthly' | 'yearly'
+
+type Subscription = {
+  id: string
+  name: string
+  amount: number
+  frequency: SubscriptionFrequency
+  accent: string
+  nextBillingDate: string
+}
 
 type Category = {
   id: string
@@ -15,14 +26,19 @@ type Category = {
   accent: string
 }
 
-type Transaction = {
+type AccountType = 'bank' | 'cash'
+
+interface BudgetEntry {
   id: string
-  type: EntryType
-  categoryId: string
   amount: number
+  categoryId: string
   note: string
   createdAt: string
+  type: EntryType
+  accountType?: AccountType
 }
+
+type Transaction = BudgetEntry;
 
 type ToastState = {
   visible: boolean
@@ -70,6 +86,7 @@ type StockQuote = {
   symbol: string
   price: number
   changePercent: number
+  currency?: string
 }
 
 type StockLot = {
@@ -129,7 +146,9 @@ const NPS_CONTRIBUTIONS_STORAGE_KEY = 'project-x-nps-contributions-v1'
 const PPF_CONTRIBUTIONS_STORAGE_KEY = 'project-x-ppf-contributions-v1'
 const FD_ACCOUNTS_STORAGE_KEY = 'project-x-fd-accounts-v1'
 const RD_ACCOUNTS_STORAGE_KEY = 'project-x-rd-accounts-v1'
+const SUBSCRIPTIONS_STORAGE_KEY = 'project-x-subscriptions-v1'
 const DAY_IN_MS = 1000 * 60 * 60 * 24
+const FINNHUB_API_KEY = 'd7qtnmpr01qudming61gd7qtnmpr01qudming620'
 
 const categoryGroups: Record<EntryType, Category[]> = {
   expense: [
@@ -170,8 +189,8 @@ type ViewOption = {
 
 const viewOptions: ViewOption[] = [
   { key: 'dashboard', label: 'Dashboard', caption: 'Pulse and trends', mobileLabel: 'Home' },
-  { key: 'add', label: 'Add Entry', caption: 'Fast transaction pad', mobileLabel: 'Add' },
   { key: 'activity', label: 'Activity', caption: 'Search and edit history', mobileLabel: 'History' },
+  { key: 'add', label: 'Add Entry', caption: 'Fast transaction pad', mobileLabel: 'Add' },
   { key: 'goals', label: 'Goals', caption: 'Habits and monthly targets', mobileLabel: 'Goals' },
   { key: 'investments', label: 'Investments', caption: 'Portfolio and allocation', mobileLabel: 'Invest' },
 ]
@@ -183,6 +202,7 @@ const investmentViewOptions: { key: InvestmentView; label: string }[] = [
   { key: 'ppf', label: 'PPF' },
   { key: 'fd', label: 'FD' },
   { key: 'rd', label: 'RD' },
+  { key: 'subscriptions', label: 'Subscriptions' },
 ]
 
 const investmentSessionDefaults: InvestmentSessionState = {
@@ -482,6 +502,31 @@ function loadRdAccounts(): RecurringDepositAccount[] {
   }
 }
 
+function loadSubscriptions(): Subscription[] {
+  const stored = window.localStorage.getItem(SUBSCRIPTIONS_STORAGE_KEY)
+  if (!stored) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Subscription[]
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed.filter(
+      (item) =>
+        typeof item.id === 'string' &&
+        typeof item.name === 'string' &&
+        Number.isFinite(item.amount) &&
+        item.amount > 0 &&
+        (item.frequency === 'monthly' || item.frequency === 'yearly')
+    )
+  } catch {
+    return []
+  }
+}
+
 function loadInvestmentSession(): InvestmentSessionState {
   const stored = window.sessionStorage.getItem(INVESTMENT_SESSION_KEY)
   if (!stored) {
@@ -564,21 +609,25 @@ function parseMfApiDate(value: string) {
 }
 
 async function fetchJsonWithFallback<T>(url: string): Promise<T> {
+  // Try direct first
   try {
     const directResponse = await fetch(url)
-    if (directResponse.ok) {
-      return (await directResponse.json()) as T
-    }
-  } catch {
-    // Fall through to CORS relay.
-  }
+    if (directResponse.ok) return (await directResponse.json()) as T
+  } catch { }
 
-  const relayResponse = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`)
-  if (!relayResponse.ok) {
-    throw new Error(`Request failed (${relayResponse.status})`)
-  }
+  // Primary Proxy: AllOrigins
+  try {
+    const cacheBuster = url.includes('?') ? `&_t=${Date.now()}` : `?_t=${Date.now()}`
+    const proxiedUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url + cacheBuster)}`
+    const res = await fetch(proxiedUrl)
+    if (res.ok) return (await res.json()) as T
+  } catch { }
 
-  return (await relayResponse.json()) as T
+  // Secondary Proxy: Codetabs (as backup)
+  const backupUrl = `https://api.codetabs.com/v1/proxy?url=${encodeURIComponent(url)}`
+  const backupRes = await fetch(backupUrl)
+  if (!backupRes.ok) throw new Error('All proxies failed')
+  return (await backupRes.json()) as T
 }
 
 async function lookupMfNavOnDate(schemeCode: string, targetDate: string) {
@@ -598,18 +647,18 @@ async function lookupMfNavOnDate(schemeCode: string, targetDate: string) {
 
   let latestBeforeOrOn:
     | {
-        nav: number
-        dateLabel: string
-        time: number
-      }
+      nav: number
+      dateLabel: string
+      time: number
+    }
     | null = null
 
   let earliestAfter:
     | {
-        nav: number
-        dateLabel: string
-        time: number
-      }
+      nav: number
+      dateLabel: string
+      time: number
+    }
     | null = null
 
   for (const row of response.data ?? []) {
@@ -658,19 +707,15 @@ function calculateSipFutureValue(monthlyAmount: number, annualRatePercent: numbe
   return monthlyAmount * ((((1 + monthlyRate) ** months - 1) / monthlyRate) * (1 + monthlyRate))
 }
 
-function currency(amount: number) {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: amount % 1 === 0 ? 0 : 2,
-  }).format(amount)
+function currency(value: number, code: string = 'INR') {
+  return formatCurrency(value, code)
 }
 
-function compactCurrency(amount: number) {
+function compactCurrency(amount: number, code: string = 'INR') {
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',
-    currency: 'INR',
-    notation: amount >= 100000 ? 'compact' : 'standard',
+    currency: code,
+    notation: Math.abs(amount) >= 100000 ? 'compact' : 'standard',
     maximumFractionDigits: 1,
   }).format(amount)
 }
@@ -726,6 +771,28 @@ function friendlyDate(dateString: string) {
   }).format(date)
 }
 
+function formatCurrency(value: number, currencyCode: string = 'INR') {
+  const isSmall = Math.abs(value) < 100
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: currencyCode,
+    minimumFractionDigits: isSmall || currencyCode !== 'INR' ? 2 : 0,
+    maximumFractionDigits: isSmall || currencyCode !== 'INR' ? 2 : 0,
+  }).format(value)
+}
+
+function getCurrencyForSymbol(symbol: string) {
+  const s = symbol.toUpperCase()
+  if (s.endsWith('.NS') || s.endsWith('.BO')) return 'INR'
+  if (s.endsWith('.NE') || s.endsWith('.TO')) return 'CAD'
+  if (s.endsWith('.L')) return 'GBP'
+  if (s.endsWith('.DE')) return 'EUR'
+  if (s.endsWith('.HK')) return 'HKD'
+  // Default to USD for others or no suffix
+  return 'USD'
+}
+
+
 function friendlyFullDate(dateString: string) {
   const date = new Date(dateString)
   if (Number.isNaN(date.getTime())) {
@@ -758,6 +825,7 @@ function App() {
   const [customGoals, setCustomGoals] = useState<CustomGoal[]>(loadCustomGoals)
   const [activeView, setActiveView] = useState<AppView>('dashboard')
   const [entryType, setEntryType] = useState<EntryType>('expense')
+  const [selectedAccount, setSelectedAccount] = useState<AccountType>('bank')
   const [selectedCategory, setSelectedCategory] = useState<string>(categoryGroups.expense[0].id)
   const [amountText, setAmountText] = useState('')
   const [note, setNote] = useState('')
@@ -768,10 +836,11 @@ function App() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [customGoalTitle, setCustomGoalTitle] = useState('')
   const [customGoalTarget, setCustomGoalTarget] = useState('')
-  const [investmentView, setInvestmentView] = useState<InvestmentView>('stocks')
+  const [investmentView, setInvestmentView] = useState<InvestmentView | null>(null)
   const [investmentSession, setInvestmentSession] = useState<InvestmentSessionState>(loadInvestmentSession)
   const [stockSymbolDraft, setStockSymbolDraft] = useState('')
   const [stockSharesDraft, setStockSharesDraft] = useState('10')
+  const [activeAllocIdx, setActiveAllocIdx] = useState<number | null>(null)
   const [stockBuyPriceDraft, setStockBuyPriceDraft] = useState('')
   const [stockLots, setStockLots] = useState<Record<string, StockLot>>(loadStockLots)
   const [mfCodeDraft, setMfCodeDraft] = useState(investmentSession.mfSchemeCode)
@@ -807,12 +876,24 @@ function App() {
   const [rdRateDraft, setRdRateDraft] = useState(String(investmentSession.rdInterestRate))
   const [rdStartDateDraft, setRdStartDateDraft] = useState(todayIsoDate())
   const [stockQuotes, setStockQuotes] = useState<StockQuote[]>([])
+  const [usdToInrRate, setUsdToInrRate] = useState<number>(83)
   const [stocksLoading, setStocksLoading] = useState(false)
   const [stocksError, setStocksError] = useState('')
   const [mfSnapshot, setMfSnapshot] = useState<MutualFundSnapshot | null>(null)
   const [mfLoading, setMfLoading] = useState(false)
   const [mfError, setMfError] = useState('')
   const [quoteUpdatedAt, setQuoteUpdatedAt] = useState<string | null>(null)
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>(loadSubscriptions)
+  const [subNameDraft, setSubNameDraft] = useState('')
+  const [subAmountDraft, setSubAmountDraft] = useState('')
+  const [subFrequencyDraft, setSubFrequencyDraft] = useState<SubscriptionFrequency>('monthly')
+  const [subDateDraft, setSubDateDraft] = useState(todayIsoDate())
+  const [stockSearchQuery, setStockSearchQuery] = useState('')
+  const [stockSearchResults, setStockSearchResults] = useState<any[]>([])
+  const [isStockSearching, setIsStockSearching] = useState(false)
+  const [mfSearchQuery, setMfSearchQuery] = useState('')
+  const [mfSearchResults, setMfSearchResults] = useState<any[]>([])
+  const [isMfSearching, setIsMfSearching] = useState(false)
   const [toast, setToast] = useState<ToastState>({
     visible: false,
     message: '',
@@ -846,6 +927,10 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(GOALS_STORAGE_KEY, JSON.stringify(goals))
   }, [goals])
+
+  useEffect(() => {
+    window.localStorage.setItem(SUBSCRIPTIONS_STORAGE_KEY, JSON.stringify(subscriptions))
+  }, [subscriptions])
 
   useEffect(() => {
     window.localStorage.setItem(CUSTOM_GOALS_STORAGE_KEY, JSON.stringify(customGoals))
@@ -996,30 +1081,54 @@ function App() {
 
   const monthlyNet = monthlySummary.income - monthlySummary.expense
 
-  const totalTracked = sortedTransactions.reduce((accumulator, transaction) => {
-    return accumulator + (transaction.type === 'income' ? transaction.amount : -transaction.amount)
-  }, 0)
+  const { bankBalance, cashBalance } = useMemo(() => {
+    return sortedTransactions.reduce(
+      (acc, t) => {
+        const amount = t.type === 'income' ? t.amount : -t.amount
+        if (t.accountType === 'cash') {
+          acc.cashBalance += amount
+        } else {
+          // Default to bank if not specified for backward compatibility
+          acc.bankBalance += amount
+        }
+        return acc
+      },
+      { bankBalance: 0, cashBalance: 0 }
+    )
+  }, [sortedTransactions])
+
+  const totalTracked = bankBalance + cashBalance
+
+  const spendingByCategory = useMemo(() => {
+    const totals = new Map<string, number>()
+    const expenseTransactions = scopedTransactions.filter((t) => t.type === 'expense')
+    const totalExpense = expenseTransactions.reduce((acc, t) => acc + t.amount, 0)
+
+    expenseTransactions.forEach((t) => {
+      totals.set(t.categoryId, (totals.get(t.categoryId) ?? 0) + t.amount)
+    })
+
+    return [...totals.entries()]
+      .map(([id, amount]) => {
+        const category = categoryGroups.expense.find((c) => c.id === id)
+        return {
+          id,
+          label: category?.label ?? 'Unsorted',
+          amount,
+          accent: category?.accent ?? '#ccc',
+          percentage: totalExpense > 0 ? (amount / totalExpense) * 100 : 0,
+        }
+      })
+      .sort((a, b) => b.amount - a.amount)
+  }, [scopedTransactions])
 
   const topSpendCategory = useMemo(() => {
-    const totals = new Map<string, number>()
-
-    scopedTransactions
-      .filter((transaction) => transaction.type === 'expense')
-      .forEach((transaction) => {
-        totals.set(
-          transaction.categoryId,
-          (totals.get(transaction.categoryId) ?? 0) + transaction.amount,
-        )
-      })
-
-    const [topCategoryId, topAmount] = [...totals.entries()].sort((a, b) => b[1] - a[1])[0] ?? ['', 0]
-    const category = categoryGroups.expense.find((item) => item.id === topCategoryId)
-
+    const top = spendingByCategory[0]
     return {
-      label: category?.label ?? 'No spend yet',
-      amount: topAmount,
+      label: top?.label ?? 'No spend yet',
+      amount: top?.amount ?? 0,
     }
-  }, [scopedTransactions])
+  }, [spendingByCategory])
 
   const savingsRate =
     summary.income > 0 ? Math.max(0, Math.round((net / summary.income) * 100)) : 0
@@ -1134,9 +1243,67 @@ function App() {
   }, [investmentSession.stockSymbols])
 
   useEffect(() => {
+    if (!stockSearchQuery.trim()) {
+      setStockSearchResults([])
+      return
+    }
+    const timeoutId = setTimeout(async () => {
+      setIsStockSearching(true)
+      try {
+        const url = `https://finnhub.io/api/v1/search?q=${encodeURIComponent(stockSearchQuery)}&token=${FINNHUB_API_KEY}`
+        const response = await fetch(url)
+        if (response.ok) {
+          const data = await response.json()
+          if (data && Array.isArray(data.result)) {
+            setStockSearchResults(
+              data.result
+                .filter((r: any) => r.type === 'Common Stock' || r.type === 'ETP' || r.type === 'ADR')
+                .slice(0, 8)
+                .map((r: any) => ({
+                  symbol: r.symbol,
+                  shortname: r.description,
+                  type: r.type,
+                }))
+            )
+          }
+        }
+      } catch {
+        setStockSearchResults([])
+      } finally {
+        setIsStockSearching(false)
+      }
+    }, 500)
+    return () => clearTimeout(timeoutId)
+  }, [stockSearchQuery])
+
+  useEffect(() => {
+    if (!mfSearchQuery.trim()) {
+      setMfSearchResults([])
+      return
+    }
+    const timeoutId = setTimeout(async () => {
+      setIsMfSearching(true)
+      try {
+        const url = `https://api.mfapi.in/mf/search?q=${encodeURIComponent(mfSearchQuery)}`
+        const data = await fetchJsonWithFallback<any[]>(url)
+        if (Array.isArray(data)) {
+          setMfSearchResults(data.slice(0, 10))
+        }
+      } catch {
+        setMfSearchResults([])
+      } finally {
+        setIsMfSearching(false)
+      }
+    }, 500)
+    return () => clearTimeout(timeoutId)
+  }, [mfSearchQuery])
+
+  useEffect(() => {
     if (parsedStockSymbols.length === 0) {
-      setStockQuotes([])
-      setStocksError('Add at least one stock symbol to fetch live quotes.')
+      Promise.resolve().then(() => {
+        setStockQuotes([])
+        setStocksError('Add at least one stock symbol to fetch live quotes.')
+      })
       return undefined
     }
 
@@ -1148,53 +1315,161 @@ function App() {
       }
 
       try {
-        type YahooQuoteResult = {
-          symbol?: string
-          regularMarketPrice?: number
-          regularMarketChangePercent?: number
+        type FinnhubQuote = {
+          c: number  // current price
+          d: number  // change
+          dp: number // percent change
+          h: number  // high
+          l: number  // low
+          o: number  // open
+          pc: number // previous close
         }
 
-        type YahooQuoteResponse = {
-          quoteResponse?: {
-            result?: YahooQuoteResult[]
+        async function fetchFinnhubQuote(symbol: string): Promise<StockQuote | null> {
+          try {
+            const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_API_KEY}`
+            const response = await fetch(url)
+            if (!response.ok) return null
+            const data: FinnhubQuote = await response.json()
+            if (!data || !Number.isFinite(data.c) || data.c === 0) return null
+            return {
+              symbol,
+              price: data.c,
+              changePercent: Number.isFinite(data.dp) ? data.dp : 0,
+              currency: getCurrencyForSymbol(symbol),
+            }
+          } catch {
+            return null
           }
         }
 
-        const symbolsParam = encodeURIComponent(parsedStockSymbols.join(','))
-        const response = await fetchJsonWithFallback<YahooQuoteResponse>(
-          `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbolsParam}`,
-        )
-
-        const quoteMap = new Map(
-          (response.quoteResponse?.result ?? [])
-            .filter(
-              (quote) =>
-                typeof quote.symbol === 'string' &&
-                typeof quote.regularMarketPrice === 'number' &&
-                Number.isFinite(quote.regularMarketPrice) &&
-                typeof quote.regularMarketChangePercent === 'number' &&
-                Number.isFinite(quote.regularMarketChangePercent),
+        async function fetchYahooQuote(symbol: string): Promise<StockQuote | null> {
+          try {
+            type YahooChartResponse = {
+              chart?: {
+                result?: Array<{
+                  meta?: {
+                    regularMarketPrice?: number
+                    previousClose?: number
+                    currency?: string
+                  }
+                }>
+              }
+            }
+            const data = await fetchJsonWithFallback<YahooChartResponse>(
+              `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`
             )
-            .map((quote) => [
-              quote.symbol?.toUpperCase(),
-              {
-                symbol: quote.symbol as string,
-                price: Number(quote.regularMarketPrice),
-                changePercent: Number(quote.regularMarketChangePercent),
-              } satisfies StockQuote,
-            ]),
-        )
+            const meta = data.chart?.result?.[0]?.meta
+            if (!meta || !Number.isFinite(meta.regularMarketPrice)) return null
 
-        const orderedQuotes = parsedStockSymbols
-          .map((symbol) => quoteMap.get(symbol))
-          .filter((quote): quote is StockQuote => quote !== undefined)
+            const price = Number(meta.regularMarketPrice)
+            const prev = Number(meta.previousClose)
+            let changePercent = 0
+            if (Number.isFinite(prev) && prev > 0) {
+              changePercent = ((price - prev) / prev) * 100
+            }
 
-        if (!isActive) {
-          return
+            return {
+              symbol,
+              price,
+              changePercent,
+              currency: meta.currency || getCurrencyForSymbol(symbol),
+            }
+          } catch {
+            return null
+          }
         }
 
+        let nseCookie = ''
+
+        async function fetchNseQuote(symbol: string): Promise<StockQuote | null> {
+          try {
+            // NSE API expects the symbol without the .NS suffix
+            const cleanSymbol = symbol.replace('.NS', '')
+
+            // These headers work in React Native mobile environments.
+            // On web browsers, CORS will block this, and it will fall back to Yahoo.
+            const headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': '*/*',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Referer': 'https://www.nseindia.com/',
+            }
+
+            if (!nseCookie) {
+              const initRes = await fetch('https://www.nseindia.com', { headers })
+              nseCookie = initRes.headers.get('set-cookie') || ''
+            }
+
+            const url = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(cleanSymbol)}`
+            const res = await fetch(url, {
+              headers: {
+                ...headers,
+                'Cookie': nseCookie,
+              },
+            })
+
+            const data = await res.json()
+            if (!data || !data.priceInfo || !Number.isFinite(data.priceInfo.lastPrice)) return null
+
+            return {
+              symbol, // Return the original symbol with .NS for UI consistency
+              price: Number(data.priceInfo.lastPrice),
+              changePercent: Number(data.priceInfo.pChange) || 0,
+            }
+          } catch {
+            return null
+          }
+        }
+
+        const isIndianSymbol = (s: string) => s.endsWith('.NS') || s.endsWith('.BO')
+
+        const loadExchangeRate = async () => {
+          try {
+            const quote = await fetchYahooQuote('USDINR=X')
+            if (quote && quote.price > 0) {
+              setUsdToInrRate(quote.price)
+            }
+          } catch { }
+        }
+
+        loadExchangeRate()
+
+        const quotePromises = parsedStockSymbols.map(async (symbol): Promise<StockQuote | null> => {
+          const isInd = isIndianSymbol(symbol)
+
+          if (isInd) {
+            if (symbol.endsWith('.NS')) {
+              const nseResult = await fetchNseQuote(symbol)
+              if (nseResult) return nseResult
+            }
+            return fetchYahooQuote(symbol)
+          }
+
+          // Non-Indian symbol or missing suffix
+          // Try Finnhub first
+          const finnhubResult = await fetchFinnhubQuote(symbol)
+          if (finnhubResult) return finnhubResult
+
+          // Fallback 1: Yahoo as-is
+          const yahooResult = await fetchYahooQuote(symbol)
+          if (yahooResult) return yahooResult
+
+          // Fallback 2: Try appending .NS if it was a plain name (likely Indian)
+          if (!symbol.includes('.')) {
+            return fetchYahooQuote(`${symbol}.NS`)
+          }
+
+          return null
+        })
+
+        const results = await Promise.all(quotePromises)
+        const orderedQuotes = results.filter((q): q is StockQuote => q !== null)
+
+        if (!isActive) return
+
         if (orderedQuotes.length === 0) {
-          setStocksError('Live stock data unavailable right now. Check symbols or retry.')
+          setStocksError('Live stock data unavailable. Check symbols or retry.')
           return
         }
 
@@ -1202,11 +1477,8 @@ function App() {
         setStocksError('')
         setQuoteUpdatedAt(new Date().toISOString())
       } catch {
-        if (!isActive) {
-          return
-        }
-
-        setStocksError('Unable to fetch stock quotes from free API right now.')
+        if (!isActive) return
+        setStocksError('Unable to fetch stock quotes from Finnhub right now.')
       } finally {
         if (isActive) {
           setStocksLoading(false)
@@ -1228,8 +1500,10 @@ function App() {
   useEffect(() => {
     const schemeCode = investmentSession.mfSchemeCode.trim()
     if (schemeCode.length === 0) {
-      setMfSnapshot(null)
-      setMfError('Enter a mutual fund scheme code (AMFI) to fetch NAV.')
+      Promise.resolve().then(() => {
+        setMfSnapshot(null)
+        setMfError('Enter a mutual fund scheme code (AMFI) to fetch NAV.')
+      })
       return undefined
     }
 
@@ -1325,7 +1599,6 @@ function App() {
         }
       }
     }
-
     void loadNavPreview()
     return () => {
       isActive = false
@@ -1357,6 +1630,8 @@ function App() {
           ? currentValue - currentValue / (1 + changePercent / 100)
           : 0
 
+      const currencyCode = quote?.currency || getCurrencyForSymbol(symbol)
+
       return {
         symbol,
         shares,
@@ -1368,21 +1643,24 @@ function App() {
         totalPnlPercent,
         changePercent,
         dayPnl,
+        currency: currencyCode,
       }
     })
   }, [parsedStockSymbols, stockLots, stockQuoteMap])
 
   const stockHoldingsSummary = useMemo(() => {
     return stockHoldingRows.reduce(
-      (accumulator, row) => {
-        accumulator.currentValue += row.currentValue
-        accumulator.investedValue += row.investedValue
-        accumulator.dayReturn += row.dayPnl
-        return accumulator
+      (acc, row) => {
+        const multiplier = row.currency === 'USD' ? usdToInrRate : 1
+        return {
+          investedValue: acc.investedValue + row.investedValue * multiplier,
+          currentValue: acc.currentValue + row.currentValue * multiplier,
+          dayReturn: acc.dayReturn + row.dayPnl * multiplier,
+        }
       },
-      { currentValue: 0, investedValue: 0, dayReturn: 0 },
+      { investedValue: 0, currentValue: 0, dayReturn: 0 }
     )
-  }, [stockHoldingRows])
+  }, [stockHoldingRows, usdToInrRate])
 
   const stockTotalReturn = stockHoldingsSummary.currentValue - stockHoldingsSummary.investedValue
   const stockTotalReturnPercent =
@@ -1722,9 +2000,9 @@ function App() {
       setMfNavLookupError('')
 
       const navInfo = await lookupMfNavOnDate(code, mfDateDraft)
-      
+
       updateInvestmentText('mfSchemeCode', code)
-      
+
       setMfHoldings((current) => {
         const existingIndex = current.findIndex(
           (h) => h.schemeCode === code && h.type === mfTypeDraft
@@ -1735,7 +2013,7 @@ function App() {
           const totalUnits = existing.units + units
           // Weighted average for buy nav
           const newBuyNav = (existing.units * existing.buyNav + units * navInfo.nav) / totalUnits
-          
+
           const updated = [...current]
           updated[existingIndex] = {
             ...existing,
@@ -1775,6 +2053,36 @@ function App() {
       setMfDateDraft(purchaseDate.slice(0, 10))
     }
     updateInvestmentText('mfSchemeCode', code)
+  }
+
+  function handleAddSubscription() {
+    const name = subNameDraft.trim()
+    const amount = Number(subAmountDraft)
+    if (!name || !Number.isFinite(amount) || amount <= 0) {
+      showToast('Enter valid subscription details.')
+      return
+    }
+    const accents = ['var(--sky)', 'var(--mint)', 'var(--coral)', 'var(--sun)', 'var(--berry)']
+    const accent = accents[subscriptions.length % accents.length]
+    setSubscriptions((curr) => [
+      {
+        id: `sub-${Date.now()}`,
+        name,
+        amount,
+        frequency: subFrequencyDraft,
+        nextBillingDate: subDateDraft,
+        accent,
+      },
+      ...curr,
+    ])
+    setSubNameDraft('')
+    setSubAmountDraft('')
+    showToast('Subscription added')
+  }
+
+  function handleDeleteSubscription(id: string) {
+    setSubscriptions((curr) => curr.filter((s) => s.id !== id))
+    showToast('Subscription deleted')
   }
 
   function handleDeleteMfHolding(holdingId: string) {
@@ -1911,6 +2219,33 @@ function App() {
     showToast(`Created ${nextAccount.name}`)
   }
 
+  const handleAdjustBalance = (type: AccountType = 'cash') => {
+    const currentVal = type === 'bank' ? bankBalance : cashBalance
+    const label = type === 'bank' ? 'Bank Balance' : 'Cash in Hand'
+    const target = prompt(`Enter your actual current ${label}:`, Math.round(currentVal).toString())
+
+    if (target !== null) {
+      const targetNum = parseFloat(target)
+      if (isNaN(targetNum)) return
+
+      const diff = targetNum - currentVal
+      if (Math.abs(diff) < 1) return
+
+      const newEntry: BudgetEntry = {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        amount: Math.abs(diff),
+        categoryId: 'other',
+        note: `${label} adjustment to ${currency(targetNum)}`,
+        createdAt: todayIsoDate(),
+        type: diff > 0 ? 'income' : 'expense',
+        accountType: type,
+      }
+
+      setTransactions((prev) => [newEntry, ...prev])
+      showToast(`${label} updated.`)
+    }
+  }
+
   function handleDeleteFdAccount(id: string) {
     const account = fdAccounts.find((item) => item.id === id)
     if (!account) {
@@ -2026,6 +2361,7 @@ function App() {
             categoryId: selectedCategoryValue,
             amount: Number(amountText),
             note: note.trim(),
+            accountType: selectedAccount,
           }
         }),
       )
@@ -2044,6 +2380,7 @@ function App() {
       amount: Number(amountText),
       note: note.trim(),
       createdAt: new Date().toISOString(),
+      accountType: selectedAccount,
     }
 
     setTransactions((current) => [nextEntry, ...current])
@@ -2138,164 +2475,283 @@ function App() {
 
         <section className="content-stack">
           {activeView === 'dashboard' ? (
-            <section className="hero-card panel">
-              <div className="hero-copy">
-                <span className="eyebrow">Live Dashboard</span>
-                <h1>Track money in seconds, not screens.</h1>
-                <p>
-                  Built for fast daily use: add entries instantly, view live financial health, and
-                  manage every transaction in one flow.
-                </p>
+            <div className="dashboard-container">
+              {/* ── SECTION 1: FINANCIAL SNAPSHOT ── */}
+              <section className="dash-hero-card">
+                <div className="dash-hero-header">
+                  <div>
+                    <span className="eyebrow">Welcome Back</span>
+                    <h1>Financial Snapshot</h1>
+                  </div>
+                  <div className="dash-hero-status">
+                    <span className="status-dot"></span>
+                    Live Updates
+                  </div>
+                </div>
+
+                <div className="dash-hero-main">
+                  <div className="dash-main-balance">
+                    <span className="mini-label">Total Tracked Balance</span>
+                    <strong className="main-balance-val">{compactCurrency(totalTracked)}</strong>
+                    <div className="balance-trend">
+                      <span className="trend-up">↑ 12%</span> vs last month
+                    </div>
+                  </div>
+
+                  <div className="dash-today-pulse">
+                    <div className="pulse-item">
+                      <span className="pulse-label">In</span>
+                      <strong className="text-positive">{compactCurrency(todaySummary.income)}</strong>
+                    </div>
+                    <div className="pulse-divider"></div>
+                    <div className="pulse-item">
+                      <span className="pulse-label">Out</span>
+                      <strong className="text-negative">{compactCurrency(todaySummary.expense)}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="dash-hero-footer">
+                  <div className="footer-stat">
+                    <span>Savings Rate</span>
+                    <strong>{savingsRate}%</strong>
+                  </div>
+                  <div className="footer-stat">
+                    <span>Active Streak</span>
+                    <strong>{streak.days} Days</strong>
+                  </div>
+                  <div className="footer-stat">
+                    <span>Top Category</span>
+                    <strong>{topSpendCategory.label}</strong>
+                  </div>
+                </div>
+              </section>
+
+              {/* ── SECTION 2: PORTFOLIO BUCKETS ── */}
+              <div className="dash-bucket-row">
+                <article className="bucket-tile" onClick={() => handleAdjustBalance('bank')} style={{ cursor: 'pointer' }}>
+                  <div className="bucket-icon">🏦</div>
+                  <div className="bucket-info">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Bank Balance</span>
+                      <span style={{ fontSize: '0.7rem', opacity: 0.6, textDecoration: 'underline' }}>Set</span>
+                    </div>
+                    <strong>{compactCurrency(bankBalance)}</strong>
+                  </div>
+                </article>
+
+                <article className="bucket-tile" onClick={() => handleAdjustBalance('cash')} style={{ cursor: 'pointer' }}>
+                  <div className="bucket-icon">💵</div>
+                  <div className="bucket-info">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Cash in Hand</span>
+                      <span style={{ fontSize: '0.7rem', opacity: 0.6, textDecoration: 'underline' }}>Set</span>
+                    </div>
+                    <strong>{compactCurrency(cashBalance)}</strong>
+                  </div>
+                </article>
+                <article className="bucket-tile">
+                  <div className="bucket-icon">📈</div>
+                  <div className="bucket-info">
+                    <span>Investments</span>
+                    <strong>{compactCurrency(stockHoldingsSummary.currentValue + mfHoldingRows.reduce((s, h) => s + h.currentValue, 0))}</strong>
+                  </div>
+                </article>
+                <article className="bucket-tile">
+                  <div className="bucket-icon">🏦</div>
+                  <div className="bucket-info">
+                    <span>Safe Assets</span>
+                    <strong>{compactCurrency(ppfContributionSummary.total + fdRows.reduce((s, a) => s + a.maturity, 0))}</strong>
+                  </div>
+                </article>
               </div>
 
-              <div className="hero-band">
-                <div className="band-item">
-                  <span className="band-label">Today income</span>
-                  <strong>{compactCurrency(todaySummary.income)}</strong>
+              {/* ── SECTION 3: INSIGHTS & ANALYTICS ── */}
+              <section className="dash-insights-card">
+                <div className="section-head">
+                  <div>
+                    <span className="eyebrow">Money Pulse</span>
+                    <h2>Insights & Trends</h2>
+                  </div>
+                  <div className="dash-range-tabs segmented-tabs">
+                    {rangeOptions.map((option) => (
+                      <button
+                        key={option.key}
+                        type="button"
+                        className={`range-chip ${range === option.key ? 'active' : ''}`}
+                        onClick={() => setRange(option.key)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="band-item">
-                  <span className="band-label">Today spend</span>
-                  <strong>{compactCurrency(todaySummary.expense)}</strong>
+
+                <div className="insight-grid">
+                  <div className="insight-main-metrics">
+                    <div className="metric-row">
+                      <div className="metric-item">
+                        <span className="mini-label">Period Income</span>
+                        <strong>{compactCurrency(summary.income)}</strong>
+                      </div>
+                      <div className="metric-item">
+                        <span className="mini-label">Period Expense</span>
+                        <strong>{compactCurrency(summary.expense)}</strong>
+                      </div>
+                    </div>
+                    <div className={`metric-net-box ${net >= 0 ? 'positive' : 'negative'}`}>
+                      <span>Net Cash Flow</span>
+                      <strong>{compactCurrency(net)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="insight-tips">
+                    <div className="tip-box">
+                      <span className="tip-icon">💡</span>
+                      <div className="tip-content">
+                        <strong>Weekly Insight</strong>
+                        <p>{weeklyInsight.message}</p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div className={`band-item ${todayNet >= 0 ? 'positive' : 'negative'}`}>
-                  <span className="band-label">Today net</span>
-                  <strong>{compactCurrency(todayNet)}</strong>
+              </section>
+
+              {/* ── SECTION 4: SPENDING BREAKDOWN ── */}
+              <section className="dash-chart-card">
+                <div className="section-head">
+                  <div>
+                    <span className="eyebrow">Allocation</span>
+                    <h2>Spending Breakdown</h2>
+                  </div>
                 </div>
-              </div>
-            </section>
+
+                <div className="chart-container">
+                  {spendingByCategory.length > 0 ? (
+                    <>
+                      <div
+                        className="pie-chart"
+                        style={{
+                          background: `conic-gradient(${spendingByCategory.reduce((acc, curr, i, arr) => {
+                            const prevPercent = arr.slice(0, i).reduce((sum, c) => sum + c.percentage, 0)
+                            return `${acc}${curr.accent} ${prevPercent}% ${prevPercent + curr.percentage}%${i === arr.length - 1 ? '' : ', '}`
+                          }, '')})`
+                        }}
+                      >
+                        <div className="pie-inner">
+                          <strong>{Math.round(spendingByCategory.reduce((s, c) => s + c.percentage, 0))}%</strong>
+                          <span>Tracked</span>
+                        </div>
+                      </div>
+
+                      <div className="chart-legend">
+                        {spendingByCategory.slice(0, 5).map((item) => (
+                          <div key={item.id} className="legend-item">
+                            <div className="legend-dot" style={{ background: item.accent }}></div>
+                            <div className="legend-info">
+                              <span className="legend-label">{item.label}</span>
+                              <span className="legend-value">{Math.round(item.percentage)}%</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty-state">
+                      <strong>No spending data yet.</strong>
+                      <p>Add some expenses to see your breakdown.</p>
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
           ) : null}
 
           {activeView === 'add' ? (
-            <section className="composer-card panel single-view-card">
+            <section className="composer-card panel single-view-card transaction-pad">
               <div className="section-head">
                 <div>
                   <span className="eyebrow">Fast Add</span>
-                  <h2>{isEditing ? 'Edit Entry' : 'Main Entry Pad'}</h2>
+                  <h2>{isEditing ? 'Edit Entry' : 'Entry Pad'}</h2>
                 </div>
-                <button type="button" className="ghost-button" onClick={resetComposer}>
-                  {isEditing ? 'Cancel Edit' : 'Clear'}
-                </button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', marginBottom: '1.5rem' }}>
+                  <div className="segmented-tabs" style={{ width: '100%' }}>
+                    {(['bank', 'cash'] as AccountType[]).map((type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        className={`toggle-chip ${type} ${selectedAccount === type ? 'active' : ''}`}
+                        onClick={() => setSelectedAccount(type)}
+                        style={{ flex: 1 }}
+                      >
+                        {type === 'bank' ? '🏦 Bank' : '💵 Cash'}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="segmented-tabs" style={{ width: '100%' }}>
+                    {(['expense', 'income'] as EntryType[]).map((type) => (
+                      <button
+                        key={type}
+                        type="button"
+                        className={`toggle-chip ${type} ${entryType === type ? 'active' : ''}`}
+                        onClick={() => handleToggleType(type)}
+                        style={{ flex: 1 }}
+                      >
+                        {type === 'expense' ? 'Out' : 'In'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
-              <div className="type-toggle segmented-tabs" role="tablist" aria-label="Transaction type">
-                {(['expense', 'income'] as EntryType[]).map((type) => (
-                  <button
-                    key={type}
-                    type="button"
-                    className={`toggle-chip ${entryType === type ? 'active' : ''}`}
-                    onClick={() => handleToggleType(type)}
-                  >
-                    {type === 'expense' ? 'Expense' : 'Income'}
-                  </button>
-                ))}
-              </div>
-
-              <div className="amount-display">
-                <label className="amount-entry">
-                  <span className="amount-prefix">Amount</span>
+              <div className="amount-display-pad">
+                <div className="amount-val-wrap">
+                  <span className="currency-symbol">₹</span>
                   <input
                     type="text"
                     inputMode="decimal"
-                    enterKeyHint="done"
-                    placeholder="Enter amount"
+                    className="amount-input-field"
                     value={amountText}
-                    onChange={(event) => handleAmountChange(event.target.value)}
-                    aria-label="Transaction amount"
+                    onChange={(e) => handleAmountChange(e.target.value)}
+                    placeholder="0"
+                    autoFocus
                   />
-                </label>
-                <strong>{amountText.length > 0 ? currency(Number(amountText)) : currency(0)}</strong>
+                </div>
+                <div className="amount-preview">
+                  {isEditing ? 'Editing existing' : 'New transaction'}
+                </div>
               </div>
 
-              <div className="category-strip">
+              <div className="category-grid-pad">
                 {activeCategories.map((category) => (
                   <button
                     key={category.id}
                     type="button"
-                    className={`category-pill ${selectedCategoryValue === category.id ? 'selected' : ''}`}
-                    style={{ '--pill-accent': category.accent } as CSSProperties}
+                    className={`cat-pad-item ${selectedCategoryValue === category.id ? 'active' : ''}`}
+                    style={{ '--cat-accent': category.accent } as CSSProperties}
                     onClick={() => setSelectedCategory(category.id)}
                   >
-                    {category.label}
+                    <span className="cat-pad-label">{category.label}</span>
                   </button>
                 ))}
               </div>
 
-              <label className="note-field">
-                <span>Note</span>
+              <div className="pad-footer">
                 <input
+                  className="pad-note-input"
                   value={note}
                   onChange={(event) => setNote(event.target.value)}
-                  placeholder="Optional note, merchant, or reminder"
+                  placeholder="What was this for?"
                   maxLength={80}
                 />
-              </label>
-
-              <button
-                type="button"
-                className={`save-button ${entryType}`}
-                onClick={handleSaveTransaction}
-                disabled={!canSave}
-              >
-                {isEditing
-                  ? `Save ${entryType === 'expense' ? 'Expense' : 'Income'}`
-                  : `Add ${entryType === 'expense' ? 'Expense' : 'Income'}`}
-              </button>
-            </section>
-          ) : null}
-
-          {activeView === 'dashboard' ? (
-            <section className="insight-card panel">
-              <div className="section-head">
-                <div>
-                  <span className="eyebrow">Live Overview</span>
-                  <h2>Money Pulse</h2>
-                </div>
-              </div>
-
-              <div className="range-row segmented-tabs">
-                {rangeOptions.map((option) => (
-                  <button
-                    key={option.key}
-                    type="button"
-                    className={`range-chip ${range === option.key ? 'active' : ''}`}
-                    onClick={() => setRange(option.key)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="metric-grid">
-                <article className="metric-tile">
-                  <span>Income</span>
-                  <strong>{compactCurrency(summary.income)}</strong>
-                </article>
-                <article className="metric-tile">
-                  <span>Expenses</span>
-                  <strong>{compactCurrency(summary.expense)}</strong>
-                </article>
-                <article className={`metric-tile ${net >= 0 ? 'positive' : 'negative'}`}>
-                  <span>Net</span>
-                  <strong>{compactCurrency(net)}</strong>
-                </article>
-              </div>
-
-              <div className="mini-grid">
-                <article className="mini-tile">
-                  <span className="mini-label">Top spend</span>
-                  <strong>{topSpendCategory.label}</strong>
-                  <p>{topSpendCategory.amount > 0 ? currency(topSpendCategory.amount) : 'No spend yet'}</p>
-                </article>
-                <article className="mini-tile">
-                  <span className="mini-label">Savings rate</span>
-                  <strong>{savingsRate}%</strong>
-                  <p>Based on active date and category tabs</p>
-                </article>
-                <article className="mini-tile">
-                  <span className="mini-label">Running balance</span>
-                  <strong>{compactCurrency(totalTracked)}</strong>
-                  <p>All tracked entries</p>
-                </article>
+                <button
+                  type="button"
+                  className={`pad-save-btn ${entryType} ${!canSave ? 'disabled' : ''}`}
+                  onClick={handleSaveTransaction}
+                  disabled={!canSave}
+                >
+                  {isEditing ? 'Update' : 'Confirm'}
+                </button>
               </div>
             </section>
           ) : null}
@@ -2476,689 +2932,1099 @@ function App() {
 
           {activeView === 'investments' ? (
             <section className="investments-card panel single-view-card broker-investments">
-              <div className="section-head">
-                <div>
-                  <span className="eyebrow">Long Term</span>
-                  <h2>Investment Hub</h2>
-                </div>
-                <span className="feed-count">
-                  {quoteUpdatedAt
-                    ? `Updated ${new Intl.DateTimeFormat('en-IN', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      }).format(new Date(quoteUpdatedAt))}`
-                    : 'Waiting for live feed'}
-                </span>
-              </div>
 
-              <div className="investment-view-tabs" role="tablist" aria-label="Investment sections">
-                {investmentViewOptions.map((option) => (
-                  <button
-                    key={option.key}
-                    type="button"
-                    className={`investment-view-tab ${investmentView === option.key ? 'active' : ''}`}
-                    role="tab"
-                    aria-selected={investmentView === option.key}
-                    onClick={() => setInvestmentView(option.key)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-
-              {investmentView === 'stocks' ? (
-                <section className="stocks-screen">
-                  <article className="stocks-summary-card">
-                    <strong>{compactCurrency(stockHoldingsSummary.currentValue)}</strong>
-                    <div className="stocks-summary-grid">
-                      <p>
-                        1D returns
-                        <span className={stockHoldingsSummary.dayReturn >= 0 ? 'text-positive' : 'text-negative'}>
-                          {stockHoldingsSummary.dayReturn >= 0 ? '+' : ''}
-                          {currency(stockHoldingsSummary.dayReturn)} ({stockDayReturnPercent.toFixed(2)}%)
-                        </span>
-                      </p>
-                      <p>
-                        Total returns
-                        <span className={stockTotalReturn >= 0 ? 'text-positive' : 'text-negative'}>
-                          {stockTotalReturn >= 0 ? '+' : ''}
-                          {currency(stockTotalReturn)} ({stockTotalReturnPercent.toFixed(2)}%)
-                        </span>
-                      </p>
-                      <p>
-                        Invested
-                        <span>{currency(stockHoldingsSummary.investedValue)}</span>
-                      </p>
+              {/* ── OVERVIEW DASHBOARD ── */}
+              {investmentView === null ? (
+                <>
+                  {/* Hero card — total portfolio */}
+                  <div className="invest-hero-card">
+                    <div className="invest-hero-copy">
+                      <span className="eyebrow">Portfolio Overview</span>
+                      <h2 className="invest-hero-total">
+                        {compactCurrency(
+                          stockHoldingsSummary.currentValue +
+                          mfHoldingRows.reduce((s, h) => s + h.currentValue, 0) +
+                          npsContributionSummary.total +
+                          ppfContributionSummary.total +
+                          fdRows.reduce((s, a) => s + a.maturity, 0) +
+                          rdRows.reduce((s, a) => s + a.maturity, 0)
+                        )}
+                      </h2>
+                      <p className="invest-hero-sub">Total portfolio value across all instruments</p>
                     </div>
-                  </article>
-
-                  <div className="stock-add-grid">
-                    <label className="invest-field">
-                      <span>Symbol</span>
-                      <input
-                        type="text"
-                        value={stockSymbolDraft}
-                        onChange={(event) => setStockSymbolDraft(event.target.value)}
-                        placeholder="TCS.NS"
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') {
-                            event.preventDefault()
-                            handleAddStockSymbol()
-                          }
-                        }}
-                      />
-                    </label>
-                    <label className="invest-field">
-                      <span>Shares</span>
-                      <input
-                        type="number"
-                        min={1}
-                        step={1}
-                        value={stockSharesDraft}
-                        onChange={(event) => setStockSharesDraft(event.target.value)}
-                        placeholder="10"
-                      />
-                    </label>
-                    <label className="invest-field">
-                      <span>Avg buy price</span>
-                      <input
-                        type="number"
-                        min={0}
-                        step={0.01}
-                        value={stockBuyPriceDraft}
-                        onChange={(event) => setStockBuyPriceDraft(event.target.value)}
-                        placeholder="Optional"
-                      />
-                    </label>
-                    <button type="button" className="mini-action-button" onClick={handleAddStockSymbol}>
-                      Add Stock
-                    </button>
+                    <div className="invest-hero-band">
+                      <div className="invest-hero-band-item">
+                        <span>Invested</span>
+                        <strong>
+                          {compactCurrency(
+                            stockHoldingsSummary.investedValue +
+                            mfHoldingRows.reduce((s, h) => s + h.invested, 0) +
+                            npsContributionSummary.total +
+                            ppfContributionSummary.total +
+                            fdRows.reduce((s, a) => s + a.principal, 0) +
+                            rdRows.reduce((s, a) => s + a.invested, 0)
+                          )}
+                        </strong>
+                      </div>
+                      <div className={`invest-hero-band-item ${stockTotalReturn >= 0 ? 'positive' : 'negative'}`}>
+                        <span>Stocks P&L</span>
+                        <strong>
+                          {stockTotalReturn >= 0 ? '+' : ''}{compactCurrency(stockTotalReturn)}
+                          {' '}
+                          <em>({stockTotalReturnPercent.toFixed(1)}%)</em>
+                        </strong>
+                      </div>
+                      <div className="invest-hero-band-item">
+                        <span>Instruments</span>
+                        <strong>6 active</strong>
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="chip-list">
-                    {parsedStockSymbols.map((symbol) => (
+                  {/* ── Interactive Allocation Donut ── */}
+                  {(() => {
+                    const vals = [
+                      { label: 'Stocks', val: stockHoldingsSummary.currentValue, color: '#73a6ff' },
+                      { label: 'Mut. Funds', val: mfHoldingRows.reduce((s, h) => s + h.currentValue, 0), color: '#1dbf91' },
+                      { label: 'NPS', val: npsContributionSummary.total, color: '#c47ef7' },
+                      { label: 'PPF', val: ppfContributionSummary.total, color: '#ffbf69' },
+                      { label: 'FD', val: fdRows.reduce((s, a) => s + a.maturity, 0), color: '#ff7d5d' },
+                      { label: 'RD', val: rdRows.reduce((s, a) => s + a.maturity, 0), color: '#e8c97a' },
+                    ].filter(v => v.val > 0)
+
+                    const total = vals.reduce((s, v) => s + v.val, 0)
+                    const radius = 70
+                    const strokeWidth = 14
+                    const center = 80
+                    const circ = 2 * Math.PI * radius
+                    let cumPct = 0
+
+                    const activeItem = activeAllocIdx !== null ? vals[activeAllocIdx] : null
+
+                    return (
+                      <div className="invest-alloc-container">
+                        <div className="invest-alloc-main">
+                          <svg width={center * 2} height={center * 2} viewBox={`0 0 ${center * 2} ${center * 2}`}>
+                            <circle
+                              cx={center} cy={center} r={radius}
+                              fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth={strokeWidth}
+                            />
+                            {vals.map((v, i) => {
+                              const pct = v.val / total
+                              const offset = circ * (1 - cumPct)
+                              const dash = circ * pct
+                              const rotate = (cumPct * 360) - 90
+                              cumPct += pct
+                              return (
+                                <circle
+                                  key={v.label}
+                                  cx={center} cy={center} r={radius}
+                                  fill="none"
+                                  stroke={v.color}
+                                  strokeWidth={activeAllocIdx === i ? strokeWidth + 4 : strokeWidth}
+                                  strokeDasharray={`${dash} ${circ - dash}`}
+                                  strokeDashoffset={circ * 0.25} // start at top
+                                  transform={`rotate(${rotate} ${center} ${center})`}
+                                  style={{ transition: 'stroke-width 0.2s, stroke 0.2s', cursor: 'pointer' }}
+                                  onMouseEnter={() => setActiveAllocIdx(i)}
+                                  onMouseLeave={() => setActiveAllocIdx(null)}
+                                  onTouchStart={(e) => {
+                                    e.preventDefault();
+                                    setActiveAllocIdx(i);
+                                  }}
+                                />
+                              )
+                            })}
+                          </svg>
+
+                          <div className="invest-alloc-center-large">
+                            {activeItem ? (
+                              <>
+                                <span className="alloc-label" style={{ color: activeItem.color }}>{activeItem.label}</span>
+                                <strong className="alloc-pct">{((activeItem.val / total) * 100).toFixed(1)}%</strong>
+                                <span className="alloc-val">{compactCurrency(activeItem.val)}</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="alloc-label">Total Allocation</span>
+                                <strong className="alloc-total">{total > 0 ? compactCurrency(total) : '₹0'}</strong>
+                                <span className="alloc-hint">Touch segments for details</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  {/* Portfolio Insights */}
+                  <div className="invest-mini-grid">
+                    <article className="invest-mini-tile">
+                      <span className="invest-mini-label">Equity Exposure</span>
+                      <strong>
+                        {(() => {
+                          const eq = stockHoldingsSummary.currentValue + mfHoldingRows.reduce((s, h) => s + h.currentValue, 0);
+                          const tot = stockHoldingsSummary.currentValue +
+                            mfHoldingRows.reduce((s, h) => s + h.currentValue, 0) +
+                            npsContributionSummary.total +
+                            ppfContributionSummary.total +
+                            fdRows.reduce((s, a) => s + a.maturity, 0) +
+                            rdRows.reduce((s, a) => s + a.maturity, 0);
+                          return tot > 0 ? ((eq / tot) * 100).toFixed(0) : 0;
+                        })()}%
+                      </strong>
+                      <p>Stocks & Mutual Funds</p>
+                    </article>
+                    <article className="invest-mini-tile">
+                      <span className="invest-mini-label">Fixed Income</span>
+                      <strong>
+                        {compactCurrency(
+                          ppfContributionSummary.total +
+                          fdRows.reduce((s, a) => s + a.principal, 0) +
+                          rdRows.reduce((s, a) => s + a.invested, 0)
+                        )}
+                      </strong>
+                      <p>PPF, FD & RD principal</p>
+                    </article>
+                    <article className="invest-mini-tile">
+                      <span className="invest-mini-label">Asset Spread</span>
+                      <strong>
+                        {[
+                          stockHoldingsSummary.currentValue,
+                          mfHoldingRows.reduce((s, h) => s + h.currentValue, 0),
+                          npsContributionSummary.total,
+                          ppfContributionSummary.total,
+                          fdRows.reduce((s, a) => s + a.maturity, 0),
+                          rdRows.reduce((s, a) => s + a.maturity, 0)
+                        ].filter(v => v > 0).length} / 6
+                      </strong>
+                      <p>Active asset classes</p>
+                    </article>
+                  </div>
+
+                  {/* Metric grid — per instrument */}
+
+                  <div className="section-head compact-head" style={{ marginTop: '0.5rem' }}>
+                    <div><h3>Instrument Breakdown</h3></div>
+                    <span className="feed-count">
+                      {quoteUpdatedAt
+                        ? `Live · ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit' }).format(new Date(quoteUpdatedAt))}`
+                        : 'Feed pending'}
+                    </span>
+                  </div>
+
+                  <div className="invest-metric-grid">
+                    <article className="invest-metric-tile" style={{ '--tile-accent': 'var(--sky)' } as CSSProperties}>
+                      <span className="invest-metric-icon">📈</span>
+                      <span className="invest-metric-label">Stocks</span>
+                      <strong className="invest-metric-value">{compactCurrency(stockHoldingsSummary.currentValue)}</strong>
+                      <span className={`invest-metric-sub ${stockTotalReturn >= 0 ? 'text-positive' : 'text-negative'}`}>
+                        {stockTotalReturn >= 0 ? '+' : ''}{stockTotalReturnPercent.toFixed(1)}%
+                      </span>
+                    </article>
+                    <article className="invest-metric-tile" style={{ '--tile-accent': 'var(--mint)' } as CSSProperties}>
+                      <span className="invest-metric-icon">💹</span>
+                      <span className="invest-metric-label">Mutual Funds</span>
+                      <strong className="invest-metric-value">{compactCurrency(mfHoldingRows.reduce((s, h) => s + h.currentValue, 0))}</strong>
+                      <span className="invest-metric-sub">{mfHoldings.length} fund{mfHoldings.length !== 1 ? 's' : ''}</span>
+                    </article>
+                    <article className="invest-metric-tile" style={{ '--tile-accent': 'var(--berry)' } as CSSProperties}>
+                      <span className="invest-metric-icon">🏛️</span>
+                      <span className="invest-metric-label">NPS</span>
+                      <strong className="invest-metric-value">{compactCurrency(npsContributionSummary.total)}</strong>
+                      <span className="invest-metric-sub">{npsContributions.length} entries</span>
+                    </article>
+                    <article className="invest-metric-tile" style={{ '--tile-accent': 'var(--sun)' } as CSSProperties}>
+                      <span className="invest-metric-icon">🌱</span>
+                      <span className="invest-metric-label">PPF</span>
+                      <strong className="invest-metric-value">{compactCurrency(ppfContributionSummary.total)}</strong>
+                      <span className="invest-metric-sub">{ppfContributions.length} entries</span>
+                    </article>
+                    <article className="invest-metric-tile" style={{ '--tile-accent': 'var(--coral)' } as CSSProperties}>
+                      <span className="invest-metric-icon">🏦</span>
+                      <span className="invest-metric-label">Fixed Deposit</span>
+                      <strong className="invest-metric-value">{compactCurrency(fdRows.reduce((s, a) => s + a.maturity, 0))}</strong>
+                      <span className="invest-metric-sub">Maturity value</span>
+                    </article>
+                    <article className="invest-metric-tile" style={{ '--tile-accent': 'var(--sand)' } as CSSProperties}>
+                      <span className="invest-metric-icon">📅</span>
+                      <span className="invest-metric-label">Recurring Dep.</span>
+                      <strong className="invest-metric-value">{compactCurrency(rdRows.reduce((s, a) => s + a.maturity, 0))}</strong>
+                      <span className="invest-metric-sub">Maturity value</span>
+                    </article>
+                  </div>
+
+                  {/* Quick-nav feature buttons */}
+                  <div className="section-head compact-head" style={{ marginTop: '0.4rem' }}>
+                    <div><h3>Manage</h3></div>
+                  </div>
+
+                  <div className="invest-feature-grid">
+                    {([
+                      { key: 'stocks' as InvestmentView, label: 'Stocks', caption: `${stockHoldingRows.length} holding${stockHoldingRows.length !== 1 ? 's' : ''}`, icon: '📈', accent: 'var(--sky)' },
+                      { key: 'mf' as InvestmentView, label: 'Mutual Funds', caption: `${mfHoldings.length} fund${mfHoldings.length !== 1 ? 's' : ''}`, icon: '💹', accent: 'var(--mint)' },
+                      { key: 'nps' as InvestmentView, label: 'NPS', caption: `${npsContributions.length} transaction${npsContributions.length !== 1 ? 's' : ''}`, icon: '🏛️', accent: 'var(--berry)' },
+                      { key: 'ppf' as InvestmentView, label: 'PPF', caption: `${ppfContributions.length} entr${ppfContributions.length !== 1 ? 'ies' : 'y'}`, icon: '🌱', accent: 'var(--sun)' },
+                      { key: 'fd' as InvestmentView, label: 'Fixed Deposits', caption: `${fdAccounts.length} account${fdAccounts.length !== 1 ? 's' : ''}`, icon: '🏦', accent: 'var(--coral)' },
+                      { key: 'rd' as InvestmentView, label: 'Recurring Deposits', caption: `${rdAccounts.length} account${rdAccounts.length !== 1 ? 's' : ''}`, icon: '📅', accent: 'var(--sand)' },
+                      { key: 'subscriptions' as InvestmentView, label: 'Subscriptions', caption: `${subscriptions.length} active`, icon: '🔄', accent: 'var(--berry)' },
+                    ] as { key: InvestmentView; label: string; caption: string; icon: string; accent: string }[]).map((item) => (
                       <button
-                        key={symbol}
+                        key={item.key}
                         type="button"
-                        className="chip-button"
-                        onClick={() => handleRemoveStockSymbol(symbol)}
+                        className="invest-feature-btn"
+                        style={{ '--invest-accent': item.accent } as CSSProperties}
+                        onClick={() => setInvestmentView(item.key)}
                       >
-                        {symbol} x
+                        <span className="invest-feature-icon">{item.icon}</span>
+                        <div className="invest-feature-text">
+                          <strong>{item.label}</strong>
+                          <span>{item.caption}</span>
+                        </div>
+                        <span className="invest-feature-arrow">›</span>
                       </button>
                     ))}
                   </div>
 
-                  {stocksLoading ? <p className="invest-status">Loading live stock data...</p> : null}
-                  {stocksError ? <p className="invest-status warn">{stocksError}</p> : null}
+                  <p className="invest-disclaimer">
+                    Free feeds can be delayed. Quotes auto-refresh every 60 seconds.
+                  </p>
+                </>
+              ) : null}
 
-                  <div className="stocks-list-head">
-                    <span>Holdings</span>
-                    <span>Current (Invested)</span>
-                  </div>
-
-                  <div className="stock-holdings-list">
-                    {stockHoldingRows.length > 0 ? (
-                      stockHoldingRows.map((row) => (
-                        <article key={row.symbol} className="stock-holding-row">
-                          <div className="stock-holding-main">
-                            <strong>{row.symbol}</strong>
-                            <span>{row.shares} shares</span>
-                          </div>
-                          <span className={`stock-sparkline ${row.changePercent >= 0 ? 'up' : 'down'}`} />
-                          <div className="stock-holding-values">
-                            <strong className={row.totalPnl >= 0 ? 'text-positive' : 'text-negative'}>
-                              {currency(row.currentValue)}
-                            </strong>
-                            <span>({currency(row.investedValue)})</span>
-                          </div>
-                        </article>
-                      ))
-                    ) : (
-                      <p className="invest-note">Add stocks to build your holdings screen.</p>
+              {/* ── DEDICATED INSTRUMENT PAGE ── */}
+              {investmentView !== null ? (
+                <>
+                  <div className="section-head invest-inner-head">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                      <button
+                        type="button"
+                        className="invest-back-btn"
+                        onClick={() => setInvestmentView(null)}
+                      >
+                        ← Back
+                      </button>
+                      <div>
+                        <span className="eyebrow">Investment</span>
+                        <h2>{investmentViewOptions.find(o => o.key === investmentView)?.label}</h2>
+                      </div>
+                    </div>
+                    {investmentView === 'stocks' && (
+                      <span className="feed-count">
+                        {quoteUpdatedAt
+                          ? `Updated ${new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit' }).format(new Date(quoteUpdatedAt))}`
+                          : 'Waiting for live feed'}
+                      </span>
                     )}
                   </div>
-                </section>
-              ) : null}
 
-              {investmentView === 'mf' ? (
-                <section className="invest-screen-wrap">
-                  <article className="invest-section">
-                    <div className="invest-head">
-                      <strong>Mutual Funds</strong>
-                      <span>Add holding + track NAV</span>
-                    </div>
+                  {investmentView === 'stocks' ? (
+                    <section className="stocks-screen">
+                      <article className="stocks-summary-card">
+                        <strong>{compactCurrency(stockHoldingsSummary.currentValue)}</strong>
+                        <div className="stocks-summary-grid">
+                          <p>
+                            1D returns
+                            <span className={stockHoldingsSummary.dayReturn >= 0 ? 'text-positive' : 'text-negative'}>
+                              {stockHoldingsSummary.dayReturn >= 0 ? '+' : ''}
+                              {currency(stockHoldingsSummary.dayReturn)} ({stockDayReturnPercent.toFixed(2)}%)
+                            </span>
+                          </p>
+                          <p>
+                            Total returns
+                            <span className={stockTotalReturn >= 0 ? 'text-positive' : 'text-negative'}>
+                              {stockTotalReturn >= 0 ? '+' : ''}
+                              {currency(stockTotalReturn)} ({stockTotalReturnPercent.toFixed(2)}%)
+                            </span>
+                          </p>
+                          <p>
+                            Invested
+                            <span>{currency(stockHoldingsSummary.investedValue)}</span>
+                          </p>
+                        </div>
+                      </article>
 
-                    <div className="invest-field-grid">
-                      <label className="invest-field">
-                        <span>Scheme code (AMFI)</span>
-                        <input
-                          type="text"
-                          list="mf-scheme-options"
-                          value={mfCodeDraft}
-                          onChange={(event) => setMfCodeDraft(event.target.value)}
-                          placeholder="120503"
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Transaction date</span>
-                        <input
-                          type="date"
-                          value={mfDateDraft}
-                          onChange={(event) => setMfDateDraft(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Units</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.001}
-                          value={mfUnitsDraft}
-                          onChange={(event) => setMfUnitsDraft(event.target.value)}
-                          placeholder="25"
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>NAV on selected date</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.001}
-                          value={mfBuyNavDraft}
-                          readOnly
-                          placeholder="Auto fetched"
-                        />
-                      </label>
-                    </div>
+                      <div className="invest-search-wrap" style={{ position: 'relative', marginBottom: '1rem', zIndex: 10 }}>
+                        <label className="invest-field">
+                          <span>Search Symbol</span>
+                          <input
+                            type="search"
+                            value={stockSearchQuery}
+                            onChange={(e) => setStockSearchQuery(e.target.value)}
+                            placeholder="Search (e.g. Reliance)"
+                          />
+                        </label>
+                        {isStockSearching && <span className="invest-status">Searching...</span>}
+                        {stockSearchResults.length > 0 && (
+                          <ul style={{ position: 'absolute', top: '100%', left: 0, right: 0, listStyle: 'none', margin: '4px 0 0', padding: 0, background: 'var(--surface-elevated)', border: '1px solid var(--border)', borderRadius: '8px', maxHeight: '200px', overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.2)' }}>
+                            {stockSearchResults.map((res) => (
+                              <li
+                                key={res.symbol}
+                                style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)' }}
+                                onClick={() => {
+                                  setStockSymbolDraft(res.symbol)
+                                  setStockSearchQuery('')
+                                  setStockSearchResults([])
+                                }}
+                              >
+                                <strong style={{ color: 'var(--text)', display: 'block' }}>{res.symbol}</strong>
+                                <span style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>{res.shortname || res.longname}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
 
-                    <div className="type-toggle segmented-tabs mf-type-toggle" role="tablist" aria-label="Investment type">
-                      {(['sip', 'one-time'] as MfType[]).map((type) => (
-                        <button
-                          key={type}
-                          type="button"
-                          className={`toggle-chip ${mfTypeDraft === type ? 'active' : ''}`}
-                          onClick={() => setMfTypeDraft(type)}
-                        >
-                          {type === 'sip' ? 'SIP' : 'One-time'}
+                      <div className="stock-add-grid">
+                        <label className="invest-field">
+                          <span>Selected Symbol (Yahoo)</span>
+                          <input
+                            type="text"
+                            value={stockSymbolDraft}
+                            onChange={(event) => setStockSymbolDraft(event.target.value)}
+                            placeholder="TCS.NS"
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault()
+                                handleAddStockSymbol()
+                              }
+                            }}
+                          />
+                        </label>
+                        <label className="invest-field">
+                          <span>Shares</span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            value={stockSharesDraft}
+                            onChange={(event) => setStockSharesDraft(event.target.value)}
+                            placeholder="10"
+                          />
+                        </label>
+                        <label className="invest-field">
+                          <span>Avg buy price</span>
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            value={stockBuyPriceDraft}
+                            onChange={(event) => setStockBuyPriceDraft(event.target.value)}
+                            placeholder="Optional"
+                          />
+                        </label>
+                        <button type="button" className="mini-action-button" onClick={handleAddStockSymbol}>
+                          Add Stock
                         </button>
-                      ))}
-                    </div>
-                    <datalist id="mf-scheme-options">
-                      {[...new Set(mfHoldings.map((item) => item.schemeCode))].map((schemeCode) => (
-                        <option key={schemeCode} value={schemeCode} />
-                      ))}
-                    </datalist>
-
-                    {mfNavLookupLoading ? <p className="invest-status">Fetching NAV for selected date...</p> : null}
-                    {mfNavLookupError ? <p className="invest-status warn">{mfNavLookupError}</p> : null}
-
-                    <div className="inline-action-row">
-                      <button type="button" className="mini-action-button" onClick={() => void handleAddMfScheme()}>
-                        Add MF
-                      </button>
-                    </div>
-
-                    {mfLoading ? <p className="invest-status">Loading live MF NAV...</p> : null}
-                    {mfError ? <p className="invest-status warn">{mfError}</p> : null}
-
-                    <div className="account-list">
-                      {mfHoldingRows.length > 0 ? (
-                        mfHoldingRows.map((holding) => (
-                          <article key={holding.id} className="account-card">
-                            <div className="account-head">
-                              <strong>{holding.schemeName}</strong>
-                              <span>{holding.schemeCode}</span>
-                            </div>
-                            <div className="account-meta">
-                              <span>Type: {holding.type === 'sip' ? 'SIP' : 'One-time'}</span>
-                              <span>Txn date: {friendlyFullDate(holding.addedAt)}</span>
-                              <span>Units: {holding.units.toFixed(3)}</span>
-                              <span>Buy NAV: {holding.buyNav.toFixed(3)}</span>
-                              <span>Current NAV: {holding.currentNav.toFixed(3)}</span>
-                              <span>Invested: {currency(holding.invested)}</span>
-                              <span>Current: {currency(holding.currentValue)}</span>
-                              <span className={holding.pnl >= 0 ? 'text-positive' : 'text-negative'}>
-                                P&L: {holding.pnl >= 0 ? '+' : ''}
-                                {currency(holding.pnl)}
-                              </span>
-                            </div>
-                            <div className="row-actions">
-                              <button
-                                type="button"
-                                className="row-action"
-                                onClick={() => handleTrackMfScheme(holding.schemeCode, holding.addedAt)}
-                              >
-                                Track NAV
-                              </button>
-                              <button
-                                type="button"
-                                className="row-action danger"
-                                onClick={() => handleDeleteMfHolding(holding.id)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      ) : (
-                        <p className="invest-note">No MF holding yet. Add one to see it here.</p>
-                      )}
-                    </div>
-
-                    {mfSnapshot ? (
-                      <div className="mf-card">
-                        <strong>{mfSnapshot.schemeName}</strong>
-                        <span>Tracking scheme: {mfSnapshot.schemeCode}</span>
-                        <p>
-                          Latest NAV: {mfSnapshot.nav.toFixed(3)} ({mfSnapshot.navDate})
-                        </p>
                       </div>
-                    ) : null}
-                  </article>
-                </section>
-              ) : null}
 
-              {investmentView === 'nps' ? (
-                <section className="invest-screen-wrap">
-                  <article className="invest-section">
-                    <div className="invest-head">
-                      <strong>NPS</strong>
-                      <span>Date-wise contributions + projection</span>
-                    </div>
+                      <div className="chip-list">
+                        {parsedStockSymbols.map((symbol) => (
+                          <button
+                            key={symbol}
+                            type="button"
+                            className="chip-button"
+                            onClick={() => handleRemoveStockSymbol(symbol)}
+                          >
+                            {symbol} x
+                          </button>
+                        ))}
+                      </div>
 
-                    <div className="invest-field-grid">
-                      <label className="invest-field">
-                        <span>Date</span>
-                        <input
-                          type="date"
-                          value={npsContributionDate}
-                          onChange={(event) => setNpsContributionDate(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Amount</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={100}
-                          value={npsContributionAmount}
-                          onChange={(event) => setNpsContributionAmount(event.target.value)}
-                          placeholder="5000"
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Note</span>
-                        <input
-                          type="text"
-                          value={npsContributionNote}
-                          onChange={(event) => setNpsContributionNote(event.target.value)}
-                          placeholder="April contribution"
-                        />
-                      </label>
-                    </div>
+                      {stocksLoading ? <p className="invest-status">Loading live stock data...</p> : null}
+                      {stocksError ? <p className="invest-status warn">{stocksError}</p> : null}
 
-                    <button type="button" className="mini-action-button" onClick={handleAddNpsContribution}>
-                      Add Transaction
-                    </button>
+                      <div className="stocks-list-head">
+                        <span>Holdings</span>
+                        <span>Current (Invested)</span>
+                      </div>
 
-                    <div className="invest-result">
-                      <span>Transactions: {npsContributionSummary.count}</span>
-                      <strong>Contributed: {compactCurrency(npsContributionSummary.total)}</strong>
-                    </div>
+                      <div className="stock-holdings-list">
+                        {stockHoldingRows.length > 0 ? (
+                          stockHoldingRows.map((row) => (
+                            <article key={row.symbol} className="stock-holding-row">
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                <div className="stock-holding-main" style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                  <strong style={{ fontSize: '1rem' }}>{row.symbol}</strong>
+                                  <span style={{ fontSize: '0.8rem', color: 'var(--text-soft)' }}>
+                                    {row.shares} shares @ {formatCurrency(row.buyPrice, row.currency)}
+                                  </span>
+                                </div>
+                                <div className="stock-holding-values" style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                  <strong style={{ fontSize: '1rem' }}>
+                                    {row.currentPrice > 0 ? formatCurrency(row.currentValue, row.currency) : 'Fetching...'}
+                                  </strong>
+                                  <span className={row.totalPnl >= 0 ? 'text-positive' : 'text-negative'} style={{ fontSize: '0.85rem' }}>
+                                    {row.currentPrice > 0 ? (
+                                      <>
+                                        {row.totalPnl >= 0 ? '+' : ''}{formatCurrency(Math.abs(row.totalPnl), row.currency)} ({row.totalPnlPercent >= 0 ? '+' : ''}{row.totalPnlPercent.toFixed(1)}%)
+                                      </>
+                                    ) : (
+                                      'Price pending'
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
 
-                    <div className="account-list">
-                      {sortedNpsContributions.length > 0 ? (
-                        sortedNpsContributions.map((entry) => (
-                          <article key={entry.id} className="account-card">
-                            <div className="account-head">
-                              <strong>{currency(entry.amount)}</strong>
-                              <span>{friendlyFullDate(entry.date)}</span>
+                              <div style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+                                paddingTop: '0.6rem',
+                                marginTop: '0.2rem'
+                              }}>
+                                <span style={{ color: 'var(--text-soft)', fontSize: '0.82rem' }}>
+                                  Live Rate: <strong style={{ color: 'var(--text-main)', marginLeft: '4px' }}>
+                                    {row.currentPrice > 0 ? formatCurrency(row.currentPrice, row.currency) : '---'}
+                                  </strong>
+                                </span>
+                                <span className={row.changePercent >= 0 ? 'text-positive' : 'text-negative'} style={{ fontSize: '0.82rem', fontWeight: 600 }}>
+                                  {row.currentPrice > 0 ? `1D: ${row.changePercent >= 0 ? '+' : ''}${row.changePercent.toFixed(2)}%` : 'Checking...'}
+                                </span>
+                              </div>
+                            </article>
+                          ))
+                        ) : (
+                          <p className="invest-note">Add stocks to build your holdings screen.</p>
+                        )}
+                      </div>
+                    </section>
+                  ) : null}
+
+                  {investmentView === 'mf' ? (
+                    <section className="invest-screen-wrap">
+                      <article className="invest-section">
+                        <div className="invest-head">
+                          <strong>Mutual Funds</strong>
+                          <span>Add holding + track NAV</span>
+                        </div>
+
+                        <div className="invest-search-wrap" style={{ position: 'relative', marginBottom: '1rem', zIndex: 10 }}>
+                          <label className="invest-field">
+                            <span>Search Fund</span>
+                            <input
+                              type="search"
+                              value={mfSearchQuery}
+                              onChange={(e) => setMfSearchQuery(e.target.value)}
+                              placeholder="Search (e.g. HDFC Small Cap)"
+                            />
+                          </label>
+                          {isMfSearching && <span className="invest-status">Searching...</span>}
+                          {mfSearchResults.length > 0 && (
+                            <ul style={{ position: 'absolute', top: '100%', left: 0, right: 0, listStyle: 'none', margin: '4px 0 0', padding: 0, background: 'var(--surface-elevated)', border: '1px solid var(--border)', borderRadius: '8px', maxHeight: '200px', overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.2)' }}>
+                              {mfSearchResults.map((res) => (
+                                <li
+                                  key={res.schemeCode}
+                                  style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)' }}
+                                  onClick={() => {
+                                    setMfCodeDraft(String(res.schemeCode))
+                                    setMfSearchQuery('')
+                                    setMfSearchResults([])
+                                  }}
+                                >
+                                  <strong style={{ color: 'var(--text)', display: 'block' }}>{res.schemeCode}</strong>
+                                  <span style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>{res.schemeName}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+
+                        <div className="invest-field-grid">
+                          <label className="invest-field">
+                            <span>Scheme code (AMFI)</span>
+                            <input
+                              type="text"
+                              list="mf-scheme-options"
+                              value={mfCodeDraft}
+                              onChange={(event) => setMfCodeDraft(event.target.value)}
+                              placeholder="120503"
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Transaction date</span>
+                            <input
+                              type="date"
+                              value={mfDateDraft}
+                              onChange={(event) => setMfDateDraft(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Units</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.001}
+                              value={mfUnitsDraft}
+                              onChange={(event) => setMfUnitsDraft(event.target.value)}
+                              placeholder="25"
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>NAV on selected date</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.001}
+                              value={mfBuyNavDraft}
+                              readOnly
+                              placeholder="Auto fetched"
+                            />
+                          </label>
+                        </div>
+
+                        <div className="type-toggle segmented-tabs mf-type-toggle" role="tablist" aria-label="Investment type">
+                          {(['sip', 'one-time'] as MfType[]).map((type) => (
+                            <button
+                              key={type}
+                              type="button"
+                              className={`toggle-chip ${mfTypeDraft === type ? 'active' : ''}`}
+                              onClick={() => setMfTypeDraft(type)}
+                            >
+                              {type === 'sip' ? 'SIP' : 'One-time'}
+                            </button>
+                          ))}
+                        </div>
+                        <datalist id="mf-scheme-options">
+                          {[...new Set(mfHoldings.map((item) => item.schemeCode))].map((schemeCode) => (
+                            <option key={schemeCode} value={schemeCode} />
+                          ))}
+                        </datalist>
+
+                        {mfNavLookupLoading ? <p className="invest-status">Fetching NAV for selected date...</p> : null}
+                        {mfNavLookupError ? <p className="invest-status warn">{mfNavLookupError}</p> : null}
+
+                        <div className="inline-action-row">
+                          <button type="button" className="mini-action-button" onClick={() => void handleAddMfScheme()}>
+                            Add MF
+                          </button>
+                        </div>
+
+                        {mfLoading ? <p className="invest-status">Loading live MF NAV...</p> : null}
+                        {mfError ? <p className="invest-status warn">{mfError}</p> : null}
+
+                        <div className="account-list">
+                          {mfHoldingRows.length > 0 ? (
+                            mfHoldingRows.map((holding) => (
+                              <article key={holding.id} className="account-card">
+                                <div className="account-head">
+                                  <strong>{holding.schemeName}</strong>
+                                  <span>{holding.schemeCode}</span>
+                                </div>
+                                <div className="account-meta">
+                                  <span>Type: {holding.type === 'sip' ? 'SIP' : 'One-time'}</span>
+                                  <span>Txn date: {friendlyFullDate(holding.addedAt)}</span>
+                                  <span>Units: {holding.units.toFixed(3)}</span>
+                                  <span>Buy NAV: {holding.buyNav.toFixed(3)}</span>
+                                  <span>Current NAV: {holding.currentNav.toFixed(3)}</span>
+                                  <span>Invested: {currency(holding.invested)}</span>
+                                  <span>Current: {currency(holding.currentValue)}</span>
+                                  <span className={holding.pnl >= 0 ? 'text-positive' : 'text-negative'}>
+                                    P&L: {holding.pnl >= 0 ? '+' : ''}
+                                    {currency(holding.pnl)}
+                                  </span>
+                                </div>
+                                <div className="row-actions">
+                                  <button
+                                    type="button"
+                                    className="row-action"
+                                    onClick={() => handleTrackMfScheme(holding.schemeCode, holding.addedAt)}
+                                  >
+                                    Track NAV
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="row-action danger"
+                                    onClick={() => handleDeleteMfHolding(holding.id)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </article>
+                            ))
+                          ) : (
+                            <p className="invest-note">No MF holding yet. Add one to see it here.</p>
+                          )}
+                        </div>
+
+                        {mfSnapshot ? (
+                          <div className="mf-card">
+                            <strong>{mfSnapshot.schemeName}</strong>
+                            <span>Tracking scheme: {mfSnapshot.schemeCode}</span>
+                            <p>
+                              Latest NAV: {mfSnapshot.nav.toFixed(3)} ({mfSnapshot.navDate})
+                            </p>
+                          </div>
+                        ) : null}
+                      </article>
+                    </section>
+                  ) : null}
+
+                  {investmentView === 'nps' ? (
+                    <section className="invest-screen-wrap">
+                      <article className="invest-section">
+                        <div className="invest-head">
+                          <strong>NPS</strong>
+                          <span>Date-wise contributions + projection</span>
+                        </div>
+
+                        <div className="invest-field-grid">
+                          <label className="invest-field">
+                            <span>Date</span>
+                            <input
+                              type="date"
+                              value={npsContributionDate}
+                              onChange={(event) => setNpsContributionDate(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Amount</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={100}
+                              value={npsContributionAmount}
+                              onChange={(event) => setNpsContributionAmount(event.target.value)}
+                              placeholder="5000"
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Note</span>
+                            <input
+                              type="text"
+                              value={npsContributionNote}
+                              onChange={(event) => setNpsContributionNote(event.target.value)}
+                              placeholder="April contribution"
+                            />
+                          </label>
+                        </div>
+
+                        <button type="button" className="mini-action-button" onClick={handleAddNpsContribution}>
+                          Add Transaction
+                        </button>
+
+                        <div className="invest-result">
+                          <span>Transactions: {npsContributionSummary.count}</span>
+                          <strong>Contributed: {compactCurrency(npsContributionSummary.total)}</strong>
+                        </div>
+
+                        <div className="account-list">
+                          {sortedNpsContributions.length > 0 ? (
+                            sortedNpsContributions.map((entry) => (
+                              <article key={entry.id} className="account-card">
+                                <div className="account-head">
+                                  <strong>{currency(entry.amount)}</strong>
+                                  <span>{friendlyFullDate(entry.date)}</span>
+                                </div>
+                                <div className="account-meta">
+                                  <span>{entry.note || 'No note'}</span>
+                                </div>
+                                <div className="row-actions">
+                                  <button
+                                    type="button"
+                                    className="row-action danger"
+                                    onClick={() => handleDeleteNpsContribution(entry.id)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </article>
+                            ))
+                          ) : (
+                            <p className="invest-note">No NPS transactions yet.</p>
+                          )}
+                        </div>
+
+                        <div className="section-head compact-head">
+                          <div>
+                            <h3>NPS Projection</h3>
+                          </div>
+                        </div>
+                        <div className="invest-field-grid">
+                          <label className="invest-field">
+                            <span>Monthly contribution</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={500}
+                              value={investmentSession.npsMonthlyContribution}
+                              onChange={(event) => updateInvestmentNumber('npsMonthlyContribution', event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Years</span>
+                            <input
+                              type="number"
+                              min={1}
+                              step={1}
+                              value={investmentSession.npsYears}
+                              onChange={(event) => updateInvestmentNumber('npsYears', event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Expected return (%)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.1}
+                              value={investmentSession.npsExpectedReturn}
+                              onChange={(event) => updateInvestmentNumber('npsExpectedReturn', event.target.value)}
+                            />
+                          </label>
+                        </div>
+
+                        <div className="invest-result">
+                          <span>Invested: {compactCurrency(npsProjection.invested)}</span>
+                          <span>Maturity: {compactCurrency(npsProjection.corpus)}</span>
+                          <strong className={npsProjection.gains >= 0 ? 'text-positive' : 'text-negative'}>
+                            Gains: {compactCurrency(npsProjection.gains)}
+                          </strong>
+                        </div>
+                      </article>
+                    </section>
+                  ) : null}
+
+                  {investmentView === 'ppf' ? (
+                    <section className="invest-screen-wrap">
+                      <article className="invest-section">
+                        <div className="invest-head">
+                          <strong>PPF</strong>
+                          <span>Transaction history</span>
+                        </div>
+
+                        <div className="invest-field-grid">
+                          <label className="invest-field">
+                            <span>Date</span>
+                            <input
+                              type="date"
+                              value={ppfContributionDate}
+                              onChange={(event) => setPpfContributionDate(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Amount</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={100}
+                              value={ppfContributionAmount}
+                              onChange={(event) => setPpfContributionAmount(event.target.value)}
+                              placeholder="5000"
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Note</span>
+                            <input
+                              type="text"
+                              value={ppfContributionNote}
+                              onChange={(event) => setPpfContributionNote(event.target.value)}
+                              placeholder="Top up"
+                            />
+                          </label>
+                        </div>
+
+                        <button type="button" className="mini-action-button" onClick={handleAddPpfContribution}>
+                          Add Money
+                        </button>
+
+                        <div className="invest-result">
+                          <span>Transactions: {ppfContributionSummary.count}</span>
+                          <strong>Contributed: {compactCurrency(ppfContributionSummary.total)}</strong>
+                        </div>
+
+                        <div className="account-list">
+                          {sortedPpfContributions.length > 0 ? (
+                            sortedPpfContributions.map((entry) => (
+                              <article key={entry.id} className="account-card">
+                                <div className="account-head">
+                                  <strong>{currency(entry.amount)}</strong>
+                                  <span>{friendlyFullDate(entry.date)}</span>
+                                </div>
+                                <div className="account-meta">
+                                  <span>{entry.note || 'No note'}</span>
+                                </div>
+                                <div className="row-actions">
+                                  <button
+                                    type="button"
+                                    className="row-action danger"
+                                    onClick={() => handleDeletePpfContribution(entry.id)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </article>
+                            ))
+                          ) : (
+                            <p className="invest-note">No PPF history yet.</p>
+                          )}
+                        </div>
+
+                      </article>
+                    </section>
+                  ) : null}
+
+                  {investmentView === 'fd' ? (
+                    <section className="invest-screen-wrap">
+                      <article className="invest-section">
+                        <div className="invest-head">
+                          <strong>Fixed Deposits</strong>
+                          <span>Create and manage FD accounts</span>
+                        </div>
+
+                        <div className="invest-field-grid">
+                          <label className="invest-field">
+                            <span>FD name</span>
+                            <input
+                              type="text"
+                              value={fdNameDraft}
+                              onChange={(event) => setFdNameDraft(event.target.value)}
+                              placeholder="SBI FD"
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Principal</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={1000}
+                              value={fdPrincipalDraft}
+                              onChange={(event) => setFdPrincipalDraft(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Years</span>
+                            <input
+                              type="number"
+                              min={1}
+                              step={1}
+                              value={fdYearsDraft}
+                              onChange={(event) => setFdYearsDraft(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Interest rate (%)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.1}
+                              value={fdRateDraft}
+                              onChange={(event) => setFdRateDraft(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Start date</span>
+                            <input
+                              type="date"
+                              value={fdStartDateDraft}
+                              onChange={(event) => setFdStartDateDraft(event.target.value)}
+                            />
+                          </label>
+                        </div>
+
+                        <button type="button" className="mini-action-button" onClick={handleCreateFdAccount}>
+                          Create New FD
+                        </button>
+
+                        <div className="account-list">
+                          {fdRows.length > 0 ? (
+                            fdRows.map((account) => (
+                              <article key={account.id} className="account-card">
+                                <div className="account-head">
+                                  <strong>{account.name}</strong>
+                                  <span>{friendlyFullDate(account.startDate)}</span>
+                                </div>
+                                <div className="account-meta">
+                                  <span>Principal: {currency(account.principal)}</span>
+                                  <span>Maturity: {currency(account.maturity)}</span>
+                                  <span className={account.gains >= 0 ? 'text-positive' : 'text-negative'}>
+                                    Interest: {account.gains >= 0 ? '+' : ''}
+                                    {currency(account.gains)}
+                                  </span>
+                                </div>
+                                <div className="row-actions">
+                                  <button
+                                    type="button"
+                                    className="row-action danger"
+                                    onClick={() => handleDeleteFdAccount(account.id)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </article>
+                            ))
+                          ) : (
+                            <p className="invest-note">No FD yet. Create your first FD above.</p>
+                          )}
+                        </div>
+                      </article>
+                    </section>
+                  ) : null}
+
+                  {investmentView === 'subscriptions' ? (
+                    <div className="invest-screen-wrap">
+                      <div className="invest-action-panel">
+                        <h3>Add Subscription</h3>
+                        <div className="invest-action-grid" style={{ display: 'grid', gap: '1rem', gridTemplateColumns: '1fr 1fr' }}>
+                          <label className="invest-field">
+                            <span>Service Name</span>
+                            <input type="text" value={subNameDraft} onChange={e => setSubNameDraft(e.target.value)} placeholder="Netflix, Spotify..." />
+                          </label>
+                          <label className="invest-field">
+                            <span>Cost</span>
+                            <input type="number" value={subAmountDraft} onChange={e => setSubAmountDraft(e.target.value)} placeholder="0" />
+                          </label>
+                          <label className="invest-field">
+                            <span>Frequency</span>
+                            <select value={subFrequencyDraft} onChange={e => setSubFrequencyDraft(e.target.value as SubscriptionFrequency)}>
+                              <option value="monthly">Monthly</option>
+                              <option value="yearly">Yearly</option>
+                            </select>
+                          </label>
+                          <label className="invest-field">
+                            <span>Next Billing Date</span>
+                            <input type="date" value={subDateDraft} onChange={e => setSubDateDraft(e.target.value)} />
+                          </label>
+                        </div>
+                        <button type="button" className="action-button invest-add-btn" onClick={handleAddSubscription} style={{ marginTop: '1rem' }}>
+                          Add Subscription
+                        </button>
+                      </div>
+
+                      <div className="invest-mini-grid" style={{ marginBottom: '1.5rem', marginTop: '1rem' }}>
+                        <article className="invest-mini-tile">
+                          <span className="invest-mini-label">Monthly Burn</span>
+                          <strong>{compactCurrency(subscriptions.reduce((s, c) => s + (c.frequency === 'monthly' ? c.amount : c.amount / 12), 0))}</strong>
+                          <p>Est. per month</p>
+                        </article>
+                        <article className="invest-mini-tile">
+                          <span className="invest-mini-label">Yearly Burn</span>
+                          <strong>{compactCurrency(subscriptions.reduce((s, c) => s + (c.frequency === 'yearly' ? c.amount : c.amount * 12), 0))}</strong>
+                          <p>Est. per year</p>
+                        </article>
+                      </div>
+
+                      <div className="invest-list">
+                        {subscriptions.length > 0 ? subscriptions.map(sub => (
+                          <article key={sub.id} className="invest-row">
+                            <div className="invest-row-main">
+                              <span className="invest-row-title" style={{ color: sub.accent }}>{sub.name}</span>
+                              <strong className="invest-row-val">{compactCurrency(sub.amount)} /{sub.frequency === 'monthly' ? 'mo' : 'yr'}</strong>
                             </div>
-                            <div className="account-meta">
-                              <span>{entry.note || 'No note'}</span>
-                            </div>
-                            <div className="row-actions">
-                              <button
-                                type="button"
-                                className="row-action danger"
-                                onClick={() => handleDeleteNpsContribution(entry.id)}
-                              >
-                                Delete
-                              </button>
+                            <div className="invest-row-meta">
+                              <span>Next: {friendlyDate(sub.nextBillingDate)}</span>
+                              <button type="button" className="inline-danger-button" onClick={() => handleDeleteSubscription(sub.id)}>Delete</button>
                             </div>
                           </article>
-                        ))
-                      ) : (
-                        <p className="invest-note">No NPS transactions yet.</p>
-                      )}
-                    </div>
-
-                    <div className="section-head compact-head">
-                      <div>
-                        <h3>NPS Projection</h3>
+                        )) : <p className="empty-state">No active subscriptions tracked.</p>}
                       </div>
                     </div>
-                    <div className="invest-field-grid">
-                      <label className="invest-field">
-                        <span>Monthly contribution</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={500}
-                          value={investmentSession.npsMonthlyContribution}
-                          onChange={(event) => updateInvestmentNumber('npsMonthlyContribution', event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Years</span>
-                        <input
-                          type="number"
-                          min={1}
-                          step={1}
-                          value={investmentSession.npsYears}
-                          onChange={(event) => updateInvestmentNumber('npsYears', event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Expected return (%)</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.1}
-                          value={investmentSession.npsExpectedReturn}
-                          onChange={(event) => updateInvestmentNumber('npsExpectedReturn', event.target.value)}
-                        />
-                      </label>
-                    </div>
+                  ) : null}
 
-                    <div className="invest-result">
-                      <span>Invested: {compactCurrency(npsProjection.invested)}</span>
-                      <span>Maturity: {compactCurrency(npsProjection.corpus)}</span>
-                      <strong className={npsProjection.gains >= 0 ? 'text-positive' : 'text-negative'}>
-                        Gains: {compactCurrency(npsProjection.gains)}
-                      </strong>
-                    </div>
-                  </article>
-                </section>
+                  {investmentView === 'rd' ? (
+                    <section className="invest-screen-wrap">
+                      <article className="invest-section">
+                        <div className="invest-head">
+                          <strong>Recurring Deposits</strong>
+                          <span>Create and manage RD accounts</span>
+                        </div>
+
+                        <div className="invest-field-grid">
+                          <label className="invest-field">
+                            <span>RD name</span>
+                            <input
+                              type="text"
+                              value={rdNameDraft}
+                              onChange={(event) => setRdNameDraft(event.target.value)}
+                              placeholder="Monthly RD"
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Monthly deposit</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={500}
+                              value={rdDepositDraft}
+                              onChange={(event) => setRdDepositDraft(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Years</span>
+                            <input
+                              type="number"
+                              min={1}
+                              step={1}
+                              value={rdYearsDraft}
+                              onChange={(event) => setRdYearsDraft(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Interest rate (%)</span>
+                            <input
+                              type="number"
+                              min={0}
+                              step={0.1}
+                              value={rdRateDraft}
+                              onChange={(event) => setRdRateDraft(event.target.value)}
+                            />
+                          </label>
+                          <label className="invest-field">
+                            <span>Start date</span>
+                            <input
+                              type="date"
+                              value={rdStartDateDraft}
+                              onChange={(event) => setRdStartDateDraft(event.target.value)}
+                            />
+                          </label>
+                        </div>
+
+                        <button type="button" className="mini-action-button" onClick={handleCreateRdAccount}>
+                          Create New RD
+                        </button>
+
+                        <div className="account-list">
+                          {rdRows.length > 0 ? (
+                            rdRows.map((account) => (
+                              <article key={account.id} className="account-card">
+                                <div className="account-head">
+                                  <strong>{account.name}</strong>
+                                  <span>{friendlyFullDate(account.startDate)}</span>
+                                </div>
+                                <div className="account-meta">
+                                  <span>Monthly: {currency(account.monthlyDeposit)}</span>
+                                  <span>Total deposits: {currency(account.invested)}</span>
+                                  <span>Maturity: {currency(account.maturity)}</span>
+                                  <span className={account.gains >= 0 ? 'text-positive' : 'text-negative'}>
+                                    Interest: {account.gains >= 0 ? '+' : ''}
+                                    {currency(account.gains)}
+                                  </span>
+                                </div>
+                                <div className="row-actions">
+                                  <button
+                                    type="button"
+                                    className="row-action danger"
+                                    onClick={() => handleDeleteRdAccount(account.id)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </article>
+                            ))
+                          ) : (
+                            <p className="invest-note">No RD yet. Create your first RD above.</p>
+                          )}
+                        </div>
+                      </article>
+                    </section>
+                  ) : null}
+
+                  <p className="invest-disclaimer">
+                    Free feeds can be delayed or temporarily unavailable. This screen auto-refreshes quotes every 60 seconds.
+                  </p>
+                </>
               ) : null}
 
-              {investmentView === 'ppf' ? (
-                <section className="invest-screen-wrap">
-                  <article className="invest-section">
-                    <div className="invest-head">
-                      <strong>PPF</strong>
-                      <span>Transaction history</span>
-                    </div>
-
-                    <div className="invest-field-grid">
-                      <label className="invest-field">
-                        <span>Date</span>
-                        <input
-                          type="date"
-                          value={ppfContributionDate}
-                          onChange={(event) => setPpfContributionDate(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Amount</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={100}
-                          value={ppfContributionAmount}
-                          onChange={(event) => setPpfContributionAmount(event.target.value)}
-                          placeholder="5000"
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Note</span>
-                        <input
-                          type="text"
-                          value={ppfContributionNote}
-                          onChange={(event) => setPpfContributionNote(event.target.value)}
-                          placeholder="Top up"
-                        />
-                      </label>
-                    </div>
-
-                    <button type="button" className="mini-action-button" onClick={handleAddPpfContribution}>
-                      Add Money
-                    </button>
-
-                    <div className="invest-result">
-                      <span>Transactions: {ppfContributionSummary.count}</span>
-                      <strong>Contributed: {compactCurrency(ppfContributionSummary.total)}</strong>
-                    </div>
-
-                    <div className="account-list">
-                      {sortedPpfContributions.length > 0 ? (
-                        sortedPpfContributions.map((entry) => (
-                          <article key={entry.id} className="account-card">
-                            <div className="account-head">
-                              <strong>{currency(entry.amount)}</strong>
-                              <span>{friendlyFullDate(entry.date)}</span>
-                            </div>
-                            <div className="account-meta">
-                              <span>{entry.note || 'No note'}</span>
-                            </div>
-                            <div className="row-actions">
-                              <button
-                                type="button"
-                                className="row-action danger"
-                                onClick={() => handleDeletePpfContribution(entry.id)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      ) : (
-                        <p className="invest-note">No PPF history yet.</p>
-                      )}
-                    </div>
-
-                  </article>
-                </section>
-              ) : null}
-
-              {investmentView === 'fd' ? (
-                <section className="invest-screen-wrap">
-                  <article className="invest-section">
-                    <div className="invest-head">
-                      <strong>Fixed Deposits</strong>
-                      <span>Create and manage FD accounts</span>
-                    </div>
-
-                    <div className="invest-field-grid">
-                      <label className="invest-field">
-                        <span>FD name</span>
-                        <input
-                          type="text"
-                          value={fdNameDraft}
-                          onChange={(event) => setFdNameDraft(event.target.value)}
-                          placeholder="SBI FD"
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Principal</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={1000}
-                          value={fdPrincipalDraft}
-                          onChange={(event) => setFdPrincipalDraft(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Years</span>
-                        <input
-                          type="number"
-                          min={1}
-                          step={1}
-                          value={fdYearsDraft}
-                          onChange={(event) => setFdYearsDraft(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Interest rate (%)</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.1}
-                          value={fdRateDraft}
-                          onChange={(event) => setFdRateDraft(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Start date</span>
-                        <input
-                          type="date"
-                          value={fdStartDateDraft}
-                          onChange={(event) => setFdStartDateDraft(event.target.value)}
-                        />
-                      </label>
-                    </div>
-
-                    <button type="button" className="mini-action-button" onClick={handleCreateFdAccount}>
-                      Create New FD
-                    </button>
-
-                    <div className="account-list">
-                      {fdRows.length > 0 ? (
-                        fdRows.map((account) => (
-                          <article key={account.id} className="account-card">
-                            <div className="account-head">
-                              <strong>{account.name}</strong>
-                              <span>{friendlyFullDate(account.startDate)}</span>
-                            </div>
-                            <div className="account-meta">
-                              <span>Principal: {currency(account.principal)}</span>
-                              <span>Maturity: {currency(account.maturity)}</span>
-                              <span className={account.gains >= 0 ? 'text-positive' : 'text-negative'}>
-                                Interest: {account.gains >= 0 ? '+' : ''}
-                                {currency(account.gains)}
-                              </span>
-                            </div>
-                            <div className="row-actions">
-                              <button
-                                type="button"
-                                className="row-action danger"
-                                onClick={() => handleDeleteFdAccount(account.id)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      ) : (
-                        <p className="invest-note">No FD yet. Create your first FD above.</p>
-                      )}
-                    </div>
-                  </article>
-                </section>
-              ) : null}
-
-              {investmentView === 'rd' ? (
-                <section className="invest-screen-wrap">
-                  <article className="invest-section">
-                    <div className="invest-head">
-                      <strong>Recurring Deposits</strong>
-                      <span>Create and manage RD accounts</span>
-                    </div>
-
-                    <div className="invest-field-grid">
-                      <label className="invest-field">
-                        <span>RD name</span>
-                        <input
-                          type="text"
-                          value={rdNameDraft}
-                          onChange={(event) => setRdNameDraft(event.target.value)}
-                          placeholder="Monthly RD"
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Monthly deposit</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={500}
-                          value={rdDepositDraft}
-                          onChange={(event) => setRdDepositDraft(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Years</span>
-                        <input
-                          type="number"
-                          min={1}
-                          step={1}
-                          value={rdYearsDraft}
-                          onChange={(event) => setRdYearsDraft(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Interest rate (%)</span>
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.1}
-                          value={rdRateDraft}
-                          onChange={(event) => setRdRateDraft(event.target.value)}
-                        />
-                      </label>
-                      <label className="invest-field">
-                        <span>Start date</span>
-                        <input
-                          type="date"
-                          value={rdStartDateDraft}
-                          onChange={(event) => setRdStartDateDraft(event.target.value)}
-                        />
-                      </label>
-                    </div>
-
-                    <button type="button" className="mini-action-button" onClick={handleCreateRdAccount}>
-                      Create New RD
-                    </button>
-
-                    <div className="account-list">
-                      {rdRows.length > 0 ? (
-                        rdRows.map((account) => (
-                          <article key={account.id} className="account-card">
-                            <div className="account-head">
-                              <strong>{account.name}</strong>
-                              <span>{friendlyFullDate(account.startDate)}</span>
-                            </div>
-                            <div className="account-meta">
-                              <span>Monthly: {currency(account.monthlyDeposit)}</span>
-                              <span>Total deposits: {currency(account.invested)}</span>
-                              <span>Maturity: {currency(account.maturity)}</span>
-                              <span className={account.gains >= 0 ? 'text-positive' : 'text-negative'}>
-                                Interest: {account.gains >= 0 ? '+' : ''}
-                                {currency(account.gains)}
-                              </span>
-                            </div>
-                            <div className="row-actions">
-                              <button
-                                type="button"
-                                className="row-action danger"
-                                onClick={() => handleDeleteRdAccount(account.id)}
-                              >
-                                Delete
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      ) : (
-                        <p className="invest-note">No RD yet. Create your first RD above.</p>
-                      )}
-                    </div>
-                  </article>
-                </section>
-              ) : null}
-
-              <p className="invest-disclaimer">
-                Free feeds can be delayed or temporarily unavailable. This screen auto-refreshes quotes every 60 seconds.
-              </p>
             </section>
           ) : null}
 
@@ -3284,18 +4150,27 @@ function App() {
       </main>
 
       <nav className="mobile-view-nav" aria-label="Primary navigation">
-        {viewOptions.map((view) => (
-          <button
-            key={view.key}
-            type="button"
-            className={`mobile-view-button ${activeView === view.key ? 'active' : ''}`}
-            onClick={() => handleViewChange(view.key)}
-            aria-current={activeView === view.key ? 'page' : undefined}
-          >
-            <span className="mobile-view-label">{view.mobileLabel}</span>
-            <span className="mobile-view-hint">{viewSignals[view.key]}</span>
-          </button>
-        ))}
+        {viewOptions.map((view) => {
+          const icons: Record<string, string> = {
+            dashboard: '🏠',
+            activity: '📊',
+            add: '＋',
+            goals: '🎯',
+            investments: '💰',
+          }
+          return (
+            <button
+              key={view.key}
+              type="button"
+              className={`mobile-view-button ${activeView === view.key ? 'active' : ''}`}
+              onClick={() => handleViewChange(view.key)}
+              aria-current={activeView === view.key ? 'page' : undefined}
+            >
+              <span className="mobile-icon">{icons[view.key]}</span>
+              <span className="mobile-view-label">{view.mobileLabel}</span>
+            </button>
+          )
+        })}
       </nav>
 
       <div className={`toast ${toast.visible ? 'visible' : ''}`} role="status" aria-live="polite">
