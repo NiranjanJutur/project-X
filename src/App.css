@@ -2895,3 +2895,351 @@
   margin-top: 0.5rem;
   max-width: fit-content;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   BROKER ACCOUNTS MODULE
+   ═══════════════════════════════════════════════════════════════════ */
+
+.broker-disclaimer {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: 14px;
+  background: rgba(115, 166, 255, 0.08);
+  border: 1px solid rgba(115, 166, 255, 0.15);
+  margin-bottom: 1rem;
+  align-items: flex-start;
+}
+
+.broker-disclaimer span:first-child {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.broker-disclaimer p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  line-height: 1.4;
+}
+
+.broker-accounts-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.broker-account-card {
+  border-radius: 18px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 3px solid var(--broker-color, var(--sky));
+  padding: 1rem;
+  display: grid;
+  gap: 0.75rem;
+  transition: border-color 0.2s;
+}
+
+.broker-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.broker-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 10px;
+  color: white;
+  font-size: 0.78rem;
+}
+
+.broker-badge span {
+  font-size: 0.9rem;
+}
+
+.broker-badge strong {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.broker-status {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.broker-status-connected { color: var(--mint); }
+.broker-status-expired { color: var(--sun); }
+.broker-status-error { color: var(--coral); }
+.broker-status-disconnected { color: var(--text-soft); }
+
+.broker-card-body {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.broker-card-info {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.broker-card-info strong {
+  font-size: 1rem;
+  font-family: var(--font-display);
+}
+
+.broker-card-info span {
+  font-size: 0.72rem;
+  color: var(--text-soft);
+}
+
+.broker-card-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+  padding: 0.7rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.broker-card-stats > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.broker-card-stats span {
+  font-size: 0.62rem;
+  color: var(--text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.broker-card-stats strong {
+  font-size: 0.82rem;
+  font-family: var(--font-display);
+}
+
+.broker-card-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.broker-sync-btn {
+  flex: 1;
+  padding: 0.55rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid rgba(115, 166, 255, 0.3);
+  background: rgba(115, 166, 255, 0.1);
+  color: var(--sky);
+  font: 600 0.8rem/1 var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.broker-sync-btn:hover {
+  background: rgba(115, 166, 255, 0.2);
+}
+
+.broker-sync-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.broker-remove-btn {
+  padding: 0.55rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 107, 107, 0.2);
+  background: transparent;
+  color: var(--coral);
+  font: 600 0.8rem/1 var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.broker-remove-btn:hover {
+  background: rgba(255, 107, 107, 0.1);
+}
+
+.broker-error {
+  padding: 0.6rem 0.8rem;
+  border-radius: 10px;
+  background: rgba(255, 107, 107, 0.1);
+  border: 1px solid rgba(255, 107, 107, 0.2);
+  color: var(--coral);
+  font-size: 0.78rem;
+}
+
+.broker-add-form {
+  padding: 1rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.broker-form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.broker-form-actions .save-button {
+  flex: 1;
+}
+
+/* ── Portfolio Analytics ── */
+
+.broker-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.broker-stat-tile {
+  padding: 0.85rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: grid;
+  gap: 0.2rem;
+}
+
+.broker-stat-tile span {
+  font-size: 0.68rem;
+  color: var(--text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.broker-stat-tile strong {
+  font-size: 1.05rem;
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+.broker-stat-tile strong em {
+  font-style: normal;
+  font-size: 0.78rem;
+  opacity: 0.8;
+}
+
+/* ── Sector Allocation ── */
+
+.broker-sector-section {
+  margin: 1rem 0;
+}
+
+.broker-sector-section h4 {
+  font-size: 0.85rem;
+  margin: 0 0 0.6rem;
+  color: var(--text-soft);
+}
+
+.broker-sector-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 6px;
+  overflow: hidden;
+  gap: 2px;
+  margin-bottom: 0.75rem;
+}
+
+.sector-bar-segment {
+  border-radius: 4px;
+  min-width: 4px;
+  transition: width 0.3s ease;
+}
+
+.broker-sector-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.sector-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+}
+
+.sector-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sector-legend-item strong {
+  color: var(--text-soft);
+  font-weight: 600;
+}
+
+/* ── Top Movers ── */
+
+.broker-movers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.broker-movers-col h4 {
+  font-size: 0.82rem;
+  margin: 0 0 0.5rem;
+}
+
+.mover-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.6rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  margin-bottom: 0.35rem;
+}
+
+.mover-row span {
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.mover-row strong {
+  font-size: 0.78rem;
+  font-family: var(--font-display);
+}
+
+/* ── Broker Tag ── */
+
+.broker-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 8px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  border: 1px solid;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ── Holdings Section ── */
+
+.broker-holdings-section {
+  margin-top: 1rem;
+}
+
+.broker-holdings-section h4 {
+  font-size: 0.85rem;
+  margin: 0 0 0.6rem;
+  color: var(--text-soft);
+}

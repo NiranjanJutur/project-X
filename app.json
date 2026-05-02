@@ -2,7 +2,7 @@
   "expo": {
     "name": "Project X Tracker",
     "slug": "project-x-tracker",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -19,5 +19,11 @@
       },
       "package": "com.projectx.tracker"
     },
+    "extra": {
+      "eas": {
+        "projectId": "64725242-cdc5-4cbb-8947-ce6382c10b39"
+      }
+    },
+    "owner": "niranjanjutur"
   }
 }

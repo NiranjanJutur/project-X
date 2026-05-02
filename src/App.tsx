@@ -6,7 +6,7 @@ type EntryType = 'expense' | 'income'
 type RangeKey = 'today' | 'week' | 'month' | 'all'
 type TypeFilter = 'all' | EntryType
 type AppView = 'dashboard' | 'add' | 'activity' | 'goals' | 'investments'
-type InvestmentView = 'stocks' | 'mf' | 'nps' | 'ppf' | 'fd' | 'rd' | 'subscriptions'
+type InvestmentView = 'stocks' | 'mf' | 'nps' | 'ppf' | 'fd' | 'rd' | 'subscriptions' | 'accounts'
 type MfType = 'sip' | 'one-time'
 
 type SubscriptionFrequency = 'monthly' | 'yearly'
@@ -89,9 +89,43 @@ type StockQuote = {
   currency?: string
 }
 
+type BrokerType = 'angelone' | 'zerodha' | 'upstox' | 'groww' | 'manual'
+
+type BrokerConnectionStatus = 'connected' | 'expired' | 'error' | 'disconnected'
+
+type DematAccount = {
+  id: string
+  broker: BrokerType
+  nickname: string
+  accountId: string
+  color: string
+  status: BrokerConnectionStatus
+  credentials: Record<string, string>
+  jwtToken?: string
+  accessToken?: string
+  lastSynced?: string
+}
+
+type BrokerHolding = {
+  symbol: string
+  exchange: string
+  isin?: string
+  quantity: number
+  avgPrice: number
+  ltp: number
+  currentValue: number
+  investedValue: number
+  pnl: number
+  pnlPercent: number
+  dayChange: number
+  accountId: string
+  sector?: string
+}
+
 type StockLot = {
   shares: number
   buyPrice: number
+  accountId?: string
 }
 
 type MfHolding = {
@@ -147,6 +181,69 @@ const PPF_CONTRIBUTIONS_STORAGE_KEY = 'project-x-ppf-contributions-v1'
 const FD_ACCOUNTS_STORAGE_KEY = 'project-x-fd-accounts-v1'
 const RD_ACCOUNTS_STORAGE_KEY = 'project-x-rd-accounts-v1'
 const SUBSCRIPTIONS_STORAGE_KEY = 'project-x-subscriptions-v1'
+const DEMAT_ACCOUNTS_STORAGE_KEY = 'project-x-demat-accounts-v1'
+const BROKER_HOLDINGS_STORAGE_KEY = 'project-x-broker-holdings-v1'
+const PROXY_BASE = 'http://localhost:3001'
+
+// Indian stock sector classification
+const SECTOR_MAP: Record<string, string> = {
+  'INFY': 'IT', 'TCS': 'IT', 'WIPRO': 'IT', 'HCLTECH': 'IT', 'TECHM': 'IT', 'LTI': 'IT', 'LTIM': 'IT', 'MPHASIS': 'IT', 'COFORGE': 'IT', 'PERSISTENT': 'IT',
+  'HDFCBANK': 'Banking', 'ICICIBANK': 'Banking', 'SBIN': 'Banking', 'KOTAKBANK': 'Banking', 'AXISBANK': 'Banking', 'INDUSINDBK': 'Banking', 'BANDHANBNK': 'Banking', 'FEDERALBNK': 'Banking', 'IDFCFIRSTB': 'Banking', 'PNB': 'Banking', 'BANKBARODA': 'Banking', 'CANBK': 'Banking',
+  'RELIANCE': 'Energy', 'ONGC': 'Energy', 'IOC': 'Energy', 'BPCL': 'Energy', 'GAIL': 'Energy', 'POWERGRID': 'Energy', 'NTPC': 'Energy', 'ADANIGREEN': 'Energy', 'TATAPOWER': 'Energy', 'ADANIENT': 'Energy',
+  'SUNPHARMA': 'Pharma', 'DRREDDY': 'Pharma', 'CIPLA': 'Pharma', 'DIVISLAB': 'Pharma', 'BIOCON': 'Pharma', 'AUROPHARMA': 'Pharma', 'LUPIN': 'Pharma', 'APOLLOHOSP': 'Healthcare',
+  'HINDUNILVR': 'FMCG', 'ITC': 'FMCG', 'NESTLEIND': 'FMCG', 'BRITANNIA': 'FMCG', 'DABUR': 'FMCG', 'MARICO': 'FMCG', 'COLPAL': 'FMCG', 'GODREJCP': 'FMCG', 'TATACONSUM': 'FMCG',
+  'TATAMOTORS': 'Auto', 'MARUTI': 'Auto', 'M&M': 'Auto', 'BAJAJ-AUTO': 'Auto', 'HEROMOTOCO': 'Auto', 'EICHERMOT': 'Auto', 'ASHOKLEY': 'Auto', 'TATASTEEL': 'Metals', 'JSWSTEEL': 'Metals', 'HINDALCO': 'Metals', 'VEDL': 'Metals', 'COALINDIA': 'Metals',
+  'BAJFINANCE': 'Finance', 'BAJAJFINSV': 'Finance', 'HDFCLIFE': 'Insurance', 'SBILIFE': 'Insurance', 'ICICIPRULI': 'Insurance',
+  'BHARTIARTL': 'Telecom', 'IDEA': 'Telecom',
+  'ULTRACEMCO': 'Cement', 'AMBUJACEM': 'Cement', 'ACC': 'Cement', 'SHREECEM': 'Cement',
+  'TITAN': 'Consumer', 'ASIANPAINT': 'Consumer', 'PIDILITIND': 'Consumer', 'HAVELLS': 'Consumer',
+  'LTTS': 'IT', 'NAUKRI': 'IT', 'ZOMATO': 'Internet', 'PAYTM': 'Internet', 'POLICYBZR': 'Insurance',
+}
+
+const BROKER_META: Record<BrokerType, { label: string; icon: string; color: string }> = {
+  angelone: { label: 'AngelOne', icon: '🔶', color: '#ff6600' },
+  zerodha: { label: 'Zerodha', icon: '🟢', color: '#387ed1' },
+  upstox: { label: 'Upstox', icon: '🟣', color: '#6b3fa0' },
+  groww: { label: 'Groww', icon: '🟡', color: '#00d09c' },
+  manual: { label: 'Manual', icon: '📝', color: '#73a6ff' },
+}
+
+function classifySector(symbol: string): string {
+  const clean = symbol.replace(/\.NS|\.BO/g, '').toUpperCase()
+  return SECTOR_MAP[clean] || 'Other'
+}
+
+// XIRR Calculator (Newton-Raphson method)
+function calculateXIRR(cashFlows: { amount: number; date: Date }[]): number | null {
+  if (cashFlows.length < 2) return null
+  const sorted = [...cashFlows].sort((a, b) => a.date.getTime() - b.date.getTime())
+  const d0 = sorted[0].date.getTime()
+
+  function npv(rate: number) {
+    return sorted.reduce((sum, cf) => {
+      const years = (cf.date.getTime() - d0) / (365.25 * 24 * 3600 * 1000)
+      return sum + cf.amount / Math.pow(1 + rate, years)
+    }, 0)
+  }
+
+  function dnpv(rate: number) {
+    return sorted.reduce((sum, cf) => {
+      const years = (cf.date.getTime() - d0) / (365.25 * 24 * 3600 * 1000)
+      return sum - years * cf.amount / Math.pow(1 + rate, years + 1)
+    }, 0)
+  }
+
+  let guess = 0.1
+  for (let i = 0; i < 100; i++) {
+    const f = npv(guess)
+    const df = dnpv(guess)
+    if (Math.abs(df) < 1e-10) break
+    const newGuess = guess - f / df
+    if (Math.abs(newGuess - guess) < 1e-7) return newGuess * 100
+    guess = newGuess
+  }
+  return guess * 100
+}
 const DAY_IN_MS = 1000 * 60 * 60 * 24
 const FINNHUB_API_KEY = 'd7qtnmpr01qudming61gd7qtnmpr01qudming620'
 
@@ -203,6 +300,7 @@ const investmentViewOptions: { key: InvestmentView; label: string }[] = [
   { key: 'fd', label: 'FD' },
   { key: 'rd', label: 'RD' },
   { key: 'subscriptions', label: 'Subscriptions' },
+  { key: 'accounts', label: 'Broker Accounts' },
 ]
 
 const investmentSessionDefaults: InvestmentSessionState = {
@@ -900,6 +998,203 @@ function App() {
     undoTransaction: null,
     undoMode: null,
   })
+
+  // ── Demat Account State ──
+  const [dematAccounts, setDematAccounts] = useState<DematAccount[]>(() => {
+    try {
+      const raw = localStorage.getItem(DEMAT_ACCOUNTS_STORAGE_KEY)
+      return raw ? JSON.parse(raw) : []
+    } catch { return [] }
+  })
+  const [brokerHoldings, setBrokerHoldings] = useState<BrokerHolding[]>(() => {
+    try {
+      const raw = localStorage.getItem(BROKER_HOLDINGS_STORAGE_KEY)
+      return raw ? JSON.parse(raw) : []
+    } catch { return [] }
+  })
+  const [addAccountMode, setAddAccountMode] = useState(false)
+  const [accountBrokerDraft, setAccountBrokerDraft] = useState<BrokerType>('angelone')
+  const [accountNickDraft, setAccountNickDraft] = useState('')
+  const [accountIdDraft, setAccountIdDraft] = useState('')
+  const [accountCredDrafts, setAccountCredDrafts] = useState<Record<string, string>>({})
+  const [brokerSyncing, setBrokerSyncing] = useState<string | null>(null)
+  const [brokerError, setBrokerError] = useState('')
+
+  // Persist demat accounts
+  useEffect(() => { localStorage.setItem(DEMAT_ACCOUNTS_STORAGE_KEY, JSON.stringify(dematAccounts)) }, [dematAccounts])
+  useEffect(() => { localStorage.setItem(BROKER_HOLDINGS_STORAGE_KEY, JSON.stringify(brokerHoldings)) }, [brokerHoldings])
+
+  const BROKER_COLORS = ['#ff6600', '#387ed1', '#6b3fa0', '#00d09c', '#e84393', '#00b894', '#fd79a8', '#6c5ce7']
+
+  function handleAddDematAccount() {
+    if (!accountNickDraft.trim()) return
+    const newAccount: DematAccount = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      broker: accountBrokerDraft,
+      nickname: accountNickDraft.trim(),
+      accountId: accountIdDraft.trim(),
+      color: BROKER_COLORS[dematAccounts.length % BROKER_COLORS.length],
+      status: 'disconnected',
+      credentials: { ...accountCredDrafts },
+    }
+    setDematAccounts(prev => [...prev, newAccount])
+    setAddAccountMode(false)
+    setAccountNickDraft('')
+    setAccountIdDraft('')
+    setAccountCredDrafts({})
+    showToast('Account added successfully')
+  }
+
+  function handleRemoveDematAccount(id: string) {
+    setDematAccounts(prev => prev.filter(a => a.id !== id))
+    setBrokerHoldings(prev => prev.filter(h => h.accountId !== id))
+    showToast('Account removed')
+  }
+
+  async function handleSyncBrokerAccount(account: DematAccount) {
+    setBrokerSyncing(account.id)
+    setBrokerError('')
+    try {
+      let holdings: BrokerHolding[] = []
+
+      if (account.broker === 'angelone') {
+        // Step 1: Login
+        const loginRes = await fetch(`${PROXY_BASE}/api/angelone/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientCode: account.credentials.clientCode || account.accountId,
+            mpin: account.credentials.mpin,
+            totpSecret: account.credentials.totpSecret,
+            apiKey: account.credentials.apiKey,
+          }),
+        })
+        const loginData = await loginRes.json()
+        if (!loginRes.ok) throw new Error(loginData.error || 'AngelOne login failed')
+
+        // Step 2: Fetch holdings
+        const holdRes = await fetch(`${PROXY_BASE}/api/angelone/holdings`, {
+          headers: { 'x-api-key': account.credentials.apiKey, 'x-jwt-token': loginData.jwtToken },
+        })
+        const holdData = await holdRes.json()
+        if (!holdRes.ok) throw new Error(holdData.error || 'Holdings fetch failed')
+
+        holdings = (holdData.holdings || []).map((h: any) => ({
+          ...h, accountId: account.id, sector: classifySector(h.symbol),
+        }))
+
+        // Update account with JWT for future use
+        setDematAccounts(prev => prev.map(a => a.id === account.id
+          ? { ...a, jwtToken: loginData.jwtToken, status: 'connected' as BrokerConnectionStatus, lastSynced: new Date().toISOString() }
+          : a
+        ))
+      } else if (account.broker === 'zerodha') {
+        const holdRes = await fetch(`${PROXY_BASE}/api/zerodha/holdings`, {
+          headers: {
+            'x-api-key': account.credentials.apiKey,
+            'x-access-token': account.credentials.accessToken || account.accessToken || '',
+          },
+        })
+        const holdData = await holdRes.json()
+        if (!holdRes.ok) throw new Error(holdData.error || 'Holdings fetch failed')
+        holdings = (holdData.holdings || []).map((h: any) => ({
+          ...h, accountId: account.id, sector: classifySector(h.symbol),
+        }))
+        setDematAccounts(prev => prev.map(a => a.id === account.id
+          ? { ...a, status: 'connected' as BrokerConnectionStatus, lastSynced: new Date().toISOString() }
+          : a
+        ))
+      } else if (account.broker === 'upstox') {
+        const holdRes = await fetch(`${PROXY_BASE}/api/upstox/holdings`, {
+          headers: { 'x-access-token': account.credentials.accessToken || account.accessToken || '' },
+        })
+        const holdData = await holdRes.json()
+        if (!holdRes.ok) throw new Error(holdData.error || 'Holdings fetch failed')
+        holdings = (holdData.holdings || []).map((h: any) => ({
+          ...h, accountId: account.id, sector: classifySector(h.symbol),
+        }))
+        setDematAccounts(prev => prev.map(a => a.id === account.id
+          ? { ...a, status: 'connected' as BrokerConnectionStatus, lastSynced: new Date().toISOString() }
+          : a
+        ))
+      } else if (account.broker === 'groww') {
+        const holdRes = await fetch(`${PROXY_BASE}/api/groww/holdings`, {
+          headers: { 'x-session-token': account.credentials.sessionToken || '' },
+        })
+        const holdData = await holdRes.json()
+        if (!holdRes.ok) throw new Error(holdData.error || 'Holdings fetch failed')
+        holdings = (holdData.holdings || []).map((h: any) => ({
+          ...h, accountId: account.id, sector: classifySector(h.symbol),
+        }))
+        setDematAccounts(prev => prev.map(a => a.id === account.id
+          ? { ...a, status: 'connected' as BrokerConnectionStatus, lastSynced: new Date().toISOString() }
+          : a
+        ))
+      }
+
+      // Merge holdings: remove old from this account, add new
+      setBrokerHoldings(prev => [
+        ...prev.filter(h => h.accountId !== account.id),
+        ...holdings,
+      ])
+      showToast(`Synced ${holdings.length} holdings from ${BROKER_META[account.broker].label}`)
+    } catch (err: any) {
+      setBrokerError(err.message || 'Sync failed')
+      setDematAccounts(prev => prev.map(a => a.id === account.id
+        ? { ...a, status: 'error' as BrokerConnectionStatus }
+        : a
+      ))
+    } finally {
+      setBrokerSyncing(null)
+    }
+  }
+
+  // Portfolio analytics from broker holdings
+  const brokerPortfolioStats = useMemo(() => {
+    const totalInvested = brokerHoldings.reduce((s, h) => s + h.investedValue, 0)
+    const totalCurrent = brokerHoldings.reduce((s, h) => s + h.currentValue, 0)
+    const totalPnl = totalCurrent - totalInvested
+    const totalPnlPercent = totalInvested > 0 ? (totalPnl / totalInvested) * 100 : 0
+    const todayChange = brokerHoldings.reduce((s, h) => s + (h.dayChange / 100) * h.currentValue, 0)
+
+    // Sector allocation
+    const sectorMap = new Map<string, number>()
+    brokerHoldings.forEach(h => {
+      const sector = h.sector || classifySector(h.symbol)
+      sectorMap.set(sector, (sectorMap.get(sector) || 0) + h.currentValue)
+    })
+    const sectors = Array.from(sectorMap.entries())
+      .map(([name, value]) => ({ name, value, percent: totalCurrent > 0 ? (value / totalCurrent) * 100 : 0 }))
+      .sort((a, b) => b.value - a.value)
+
+    // Top gainers/losers
+    const sorted = [...brokerHoldings].sort((a, b) => b.pnlPercent - a.pnlPercent)
+    const gainers = sorted.filter(h => h.pnlPercent > 0).slice(0, 3)
+    const losers = sorted.filter(h => h.pnlPercent < 0).slice(-3).reverse()
+
+    // Account-wise breakdown
+    const byAccount = new Map<string, { invested: number; current: number; pnl: number; count: number }>()
+    brokerHoldings.forEach(h => {
+      const acc = byAccount.get(h.accountId) || { invested: 0, current: 0, pnl: 0, count: 0 }
+      acc.invested += h.investedValue
+      acc.current += h.currentValue
+      acc.pnl += h.pnl
+      acc.count++
+      byAccount.set(h.accountId, acc)
+    })
+
+    // XIRR (simplified — treat each holding's invested value as a cash outflow at purchase)
+    const cashFlows: { amount: number; date: Date }[] = []
+    brokerHoldings.forEach(h => {
+      cashFlows.push({ amount: -h.investedValue, date: new Date(Date.now() - 180 * DAY_IN_MS) })
+    })
+    if (totalCurrent > 0) {
+      cashFlows.push({ amount: totalCurrent, date: new Date() })
+    }
+    const xirr = calculateXIRR(cashFlows)
+
+    return { totalInvested, totalCurrent, totalPnl, totalPnlPercent, todayChange, sectors, gainers, losers, byAccount, xirr }
+  }, [brokerHoldings])
 
   const activeCategories = categoryGroups[entryType]
   const isEditing = editingId !== null
@@ -3148,6 +3443,7 @@ function App() {
                       { key: 'fd' as InvestmentView, label: 'Fixed Deposits', caption: `${fdAccounts.length} account${fdAccounts.length !== 1 ? 's' : ''}`, icon: '🏦', accent: 'var(--coral)' },
                       { key: 'rd' as InvestmentView, label: 'Recurring Deposits', caption: `${rdAccounts.length} account${rdAccounts.length !== 1 ? 's' : ''}`, icon: '📅', accent: 'var(--sand)' },
                       { key: 'subscriptions' as InvestmentView, label: 'Subscriptions', caption: `${subscriptions.length} active`, icon: '🔄', accent: 'var(--berry)' },
+                      { key: 'accounts' as InvestmentView, label: 'Broker Accounts', caption: `${dematAccounts.length} linked`, icon: '🔗', accent: '#73a6ff' },
                     ] as { key: InvestmentView; label: string; caption: string; icon: string; accent: string }[]).map((item) => (
                       <button
                         key={item.key}
@@ -3996,6 +4292,319 @@ function App() {
                           )}
                         </div>
                       </article>
+                    </section>
+                  ) : null}
+
+                  {/* ── BROKER ACCOUNTS VIEW ── */}
+                  {investmentView === 'accounts' ? (
+                    <section className="invest-screen-wrap">
+                      <article className="invest-section">
+                        <div className="invest-head">
+                          <strong>Connected Broker Accounts</strong>
+                          <span>Link your demat accounts to auto-fetch holdings</span>
+                        </div>
+
+                        {/* Disclaimer */}
+                        <div className="broker-disclaimer">
+                          <span>🔒</span>
+                          <p>Your credentials are stored <strong>locally on your device</strong> and sent only to broker APIs through a local proxy. Nothing is stored on any external server.</p>
+                        </div>
+
+                        {/* Existing Accounts */}
+                        <div className="broker-accounts-list">
+                          {dematAccounts.length > 0 ? dematAccounts.map(account => {
+                            const meta = BROKER_META[account.broker]
+                            const acctStats = brokerPortfolioStats.byAccount.get(account.id)
+                            return (
+                              <article key={account.id} className="broker-account-card" style={{ '--broker-color': account.color } as CSSProperties}>
+                                <div className="broker-card-header">
+                                  <div className="broker-badge" style={{ background: meta.color }}>
+                                    <span>{meta.icon}</span>
+                                    <strong>{meta.label}</strong>
+                                  </div>
+                                  <span className={`broker-status broker-status-${account.status}`}>
+                                    {account.status === 'connected' ? '● Connected' :
+                                     account.status === 'expired' ? '⚠ Expired' :
+                                     account.status === 'error' ? '✕ Error' : '○ Disconnected'}
+                                  </span>
+                                </div>
+
+                                <div className="broker-card-body">
+                                  <div className="broker-card-info">
+                                    <strong>{account.nickname}</strong>
+                                    {account.accountId && <span>ID: {account.accountId}</span>}
+                                    {account.lastSynced && <span>Last synced: {friendlyDate(account.lastSynced)}</span>}
+                                  </div>
+
+                                  {acctStats && (
+                                    <div className="broker-card-stats">
+                                      <div><span>Invested</span><strong>{compactCurrency(acctStats.invested)}</strong></div>
+                                      <div><span>Current</span><strong>{compactCurrency(acctStats.current)}</strong></div>
+                                      <div>
+                                        <span>P&L</span>
+                                        <strong className={acctStats.pnl >= 0 ? 'text-positive' : 'text-negative'}>
+                                          {acctStats.pnl >= 0 ? '+' : ''}{compactCurrency(acctStats.pnl)}
+                                        </strong>
+                                      </div>
+                                      <div><span>Holdings</span><strong>{acctStats.count}</strong></div>
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="broker-card-actions">
+                                  <button
+                                    type="button"
+                                    className="broker-sync-btn"
+                                    onClick={() => handleSyncBrokerAccount(account)}
+                                    disabled={brokerSyncing === account.id}
+                                  >
+                                    {brokerSyncing === account.id ? '⟳ Syncing...' : '↻ Sync Holdings'}
+                                  </button>
+                                  <button type="button" className="broker-remove-btn" onClick={() => handleRemoveDematAccount(account.id)}>Remove</button>
+                                </div>
+
+                                {brokerError && brokerSyncing === null && account.status === 'error' && (
+                                  <div className="broker-error">{brokerError}</div>
+                                )}
+                              </article>
+                            )
+                          }) : (
+                            <div className="empty-state">
+                              <strong>No broker accounts connected yet.</strong>
+                              <p>Add your first demat account below to start tracking.</p>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Add Account Form */}
+                        {addAccountMode ? (
+                          <div className="broker-add-form">
+                            <div className="invest-head"><strong>Add Broker Account</strong></div>
+
+                            <label className="invest-field">
+                              <span>Broker</span>
+                              <select value={accountBrokerDraft} onChange={e => { setAccountBrokerDraft(e.target.value as BrokerType); setAccountCredDrafts({}) }}>
+                                <option value="angelone">AngelOne (Smart API)</option>
+                                <option value="zerodha">Zerodha (Kite Connect)</option>
+                                <option value="upstox">Upstox</option>
+                                <option value="groww">Groww (Unofficial)</option>
+                                <option value="manual">Manual Entry</option>
+                              </select>
+                            </label>
+
+                            <label className="invest-field">
+                              <span>Account Nickname</span>
+                              <input value={accountNickDraft} onChange={e => setAccountNickDraft(e.target.value)} placeholder="e.g. My AngelOne" />
+                            </label>
+
+                            <label className="invest-field">
+                              <span>Client / Account ID</span>
+                              <input value={accountIdDraft} onChange={e => setAccountIdDraft(e.target.value)} placeholder="e.g. A12345678" />
+                            </label>
+
+                            {/* Broker-specific credential fields */}
+                            {accountBrokerDraft === 'angelone' && (
+                              <>
+                                <label className="invest-field">
+                                  <span>API Key</span>
+                                  <input type="password" value={accountCredDrafts.apiKey || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, apiKey: e.target.value }))} placeholder="Smart API Key" />
+                                </label>
+                                <label className="invest-field">
+                                  <span>MPIN</span>
+                                  <input type="password" value={accountCredDrafts.mpin || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, mpin: e.target.value }))} placeholder="Your MPIN" />
+                                </label>
+                                <label className="invest-field">
+                                  <span>TOTP Secret</span>
+                                  <input type="password" value={accountCredDrafts.totpSecret || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, totpSecret: e.target.value }))} placeholder="TOTP secret from AngelOne app" />
+                                </label>
+                              </>
+                            )}
+
+                            {accountBrokerDraft === 'zerodha' && (
+                              <>
+                                <label className="invest-field">
+                                  <span>API Key</span>
+                                  <input type="password" value={accountCredDrafts.apiKey || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, apiKey: e.target.value }))} placeholder="Kite Connect API Key" />
+                                </label>
+                                <label className="invest-field">
+                                  <span>API Secret</span>
+                                  <input type="password" value={accountCredDrafts.apiSecret || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, apiSecret: e.target.value }))} placeholder="Kite Connect API Secret" />
+                                </label>
+                                <label className="invest-field">
+                                  <span>Access Token</span>
+                                  <input type="password" value={accountCredDrafts.accessToken || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, accessToken: e.target.value }))} placeholder="Session access token" />
+                                </label>
+                              </>
+                            )}
+
+                            {accountBrokerDraft === 'upstox' && (
+                              <>
+                                <label className="invest-field">
+                                  <span>API Key</span>
+                                  <input type="password" value={accountCredDrafts.apiKey || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, apiKey: e.target.value }))} placeholder="Upstox API Key" />
+                                </label>
+                                <label className="invest-field">
+                                  <span>API Secret</span>
+                                  <input type="password" value={accountCredDrafts.apiSecret || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, apiSecret: e.target.value }))} placeholder="Upstox API Secret" />
+                                </label>
+                                <label className="invest-field">
+                                  <span>Access Token</span>
+                                  <input type="password" value={accountCredDrafts.accessToken || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, accessToken: e.target.value }))} placeholder="OAuth access token" />
+                                </label>
+                              </>
+                            )}
+
+                            {accountBrokerDraft === 'groww' && (
+                              <>
+                                <label className="invest-field">
+                                  <span>Session Token</span>
+                                  <input type="password" value={accountCredDrafts.sessionToken || ''} onChange={e => setAccountCredDrafts(p => ({ ...p, sessionToken: e.target.value }))} placeholder="auth_token cookie from Groww" />
+                                </label>
+                                <div className="broker-disclaimer" style={{ marginTop: '0.5rem' }}>
+                                  <span>⚠️</span>
+                                  <p>Groww does not have an official API. This uses an unofficial approach that may break without notice.</p>
+                                </div>
+                              </>
+                            )}
+
+                            <div className="broker-form-actions">
+                              <button type="button" className="invest-add-btn save-button" onClick={handleAddDematAccount}>Add Account</button>
+                              <button type="button" className="ghost-button" onClick={() => setAddAccountMode(false)}>Cancel</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button type="button" className="invest-add-btn save-button" style={{ width: '100%', marginTop: '1rem' }} onClick={() => setAddAccountMode(true)}>
+                            + Add Broker Account
+                          </button>
+                        )}
+                      </article>
+
+                      {/* ── BROKER PORTFOLIO ANALYTICS ── */}
+                      {brokerHoldings.length > 0 && (
+                        <article className="invest-section">
+                          <div className="invest-head">
+                            <strong>Portfolio Analytics</strong>
+                            <span>{brokerHoldings.length} holdings across {dematAccounts.length} account{dematAccounts.length !== 1 ? 's' : ''}</span>
+                          </div>
+
+                          {/* Summary Stats */}
+                          <div className="broker-stats-grid">
+                            <div className="broker-stat-tile">
+                              <span>Total Invested</span>
+                              <strong>{compactCurrency(brokerPortfolioStats.totalInvested)}</strong>
+                            </div>
+                            <div className="broker-stat-tile">
+                              <span>Current Value</span>
+                              <strong>{compactCurrency(brokerPortfolioStats.totalCurrent)}</strong>
+                            </div>
+                            <div className="broker-stat-tile">
+                              <span>Total P&L</span>
+                              <strong className={brokerPortfolioStats.totalPnl >= 0 ? 'text-positive' : 'text-negative'}>
+                                {brokerPortfolioStats.totalPnl >= 0 ? '▲' : '▼'} {compactCurrency(Math.abs(brokerPortfolioStats.totalPnl))}
+                                <em> ({brokerPortfolioStats.totalPnlPercent.toFixed(1)}%)</em>
+                              </strong>
+                            </div>
+                            <div className="broker-stat-tile">
+                              <span>XIRR</span>
+                              <strong className={brokerPortfolioStats.xirr !== null && brokerPortfolioStats.xirr >= 0 ? 'text-positive' : 'text-negative'}>
+                                {brokerPortfolioStats.xirr !== null ? `${brokerPortfolioStats.xirr.toFixed(1)}%` : '—'}
+                              </strong>
+                            </div>
+                          </div>
+
+                          {/* Sector Allocation */}
+                          {brokerPortfolioStats.sectors.length > 0 && (
+                            <div className="broker-sector-section">
+                              <h4>Sector Allocation</h4>
+                              <div className="broker-sector-bar">
+                                {brokerPortfolioStats.sectors.map((s, i) => {
+                                  const colors = ['#73a6ff', '#ff6b6b', '#ffd93d', '#6bcb77', '#a855f7', '#f472b6', '#fb923c', '#34d399', '#818cf8', '#e879f9']
+                                  return (
+                                    <div
+                                      key={s.name}
+                                      className="sector-bar-segment"
+                                      style={{ width: `${Math.max(s.percent, 2)}%`, background: colors[i % colors.length] }}
+                                      title={`${s.name}: ${s.percent.toFixed(1)}%`}
+                                    />
+                                  )
+                                })}
+                              </div>
+                              <div className="broker-sector-legend">
+                                {brokerPortfolioStats.sectors.map((s, i) => {
+                                  const colors = ['#73a6ff', '#ff6b6b', '#ffd93d', '#6bcb77', '#a855f7', '#f472b6', '#fb923c', '#34d399', '#818cf8', '#e879f9']
+                                  return (
+                                    <div key={s.name} className="sector-legend-item">
+                                      <span className="sector-dot" style={{ background: colors[i % colors.length] }} />
+                                      <span>{s.name}</span>
+                                      <strong>{s.percent.toFixed(0)}%</strong>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Top Gainers / Losers */}
+                          {(brokerPortfolioStats.gainers.length > 0 || brokerPortfolioStats.losers.length > 0) && (
+                            <div className="broker-movers">
+                              {brokerPortfolioStats.gainers.length > 0 && (
+                                <div className="broker-movers-col">
+                                  <h4>🟢 Top Gainers</h4>
+                                  {brokerPortfolioStats.gainers.map(h => (
+                                    <div key={h.symbol + h.accountId} className="mover-row">
+                                      <span>{h.symbol}</span>
+                                      <strong className="text-positive">▲ {h.pnlPercent.toFixed(1)}%</strong>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {brokerPortfolioStats.losers.length > 0 && (
+                                <div className="broker-movers-col">
+                                  <h4>🔴 Top Losers</h4>
+                                  {brokerPortfolioStats.losers.map(h => (
+                                    <div key={h.symbol + h.accountId} className="mover-row">
+                                      <span>{h.symbol}</span>
+                                      <strong className="text-negative">▼ {Math.abs(h.pnlPercent).toFixed(1)}%</strong>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* All Holdings Table */}
+                          <div className="broker-holdings-section">
+                            <h4>All Holdings</h4>
+                            <div className="invest-list">
+                              {brokerHoldings.map(h => {
+                                const account = dematAccounts.find(a => a.id === h.accountId)
+                                return (
+                                  <article key={h.symbol + h.accountId} className="invest-row">
+                                    <div className="invest-row-main">
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <span className="invest-row-title">{h.symbol}</span>
+                                        {account && (
+                                          <span className="broker-tag" style={{ background: account.color + '22', color: account.color, borderColor: account.color + '44' }}>
+                                            {BROKER_META[account.broker].icon} {account.nickname}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <strong className="invest-row-val">{compactCurrency(h.currentValue)}</strong>
+                                    </div>
+                                    <div className="invest-row-meta">
+                                      <span>{h.quantity} qty @ ₹{h.avgPrice.toFixed(0)}</span>
+                                      <span>LTP: ₹{h.ltp.toFixed(2)}</span>
+                                      <span className={h.pnl >= 0 ? 'text-positive' : 'text-negative'}>
+                                        {h.pnl >= 0 ? '+' : ''}{compactCurrency(h.pnl)} ({h.pnlPercent.toFixed(1)}%)
+                                      </span>
+                                    </div>
+                                  </article>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        </article>
+                      )}
                     </section>
                   ) : null}
 
