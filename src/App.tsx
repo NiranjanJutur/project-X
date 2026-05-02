@@ -1384,40 +1384,20 @@ function App() {
 
         async function fetchNseQuote(symbol: string): Promise<StockQuote | null> {
           try {
-            // NSE API expects the symbol without the .NS suffix
-            const cleanSymbol = symbol.replace('.NS', '')
-
-            // These headers work in React Native mobile environments.
-            // On web browsers, CORS will block this, and it will fall back to Yahoo.
-            const headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': '*/*',
-              'Accept-Language': 'en-US,en;q=0.9',
-              'Referer': 'https://www.nseindia.com/',
-            }
-
-            if (!nseCookie) {
-              const initRes = await fetch('https://www.nseindia.com', { headers })
-              nseCookie = initRes.headers.get('set-cookie') || ''
-            }
-
+            const cleanSymbol = symbol.replace('.NS', '').toUpperCase()
+            // Browsers block direct NSE requests due to CORS. Using proxy is mandatory.
             const url = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(cleanSymbol)}`
-            const res = await fetch(url, {
-              headers: {
-                ...headers,
-                'Cookie': nseCookie,
-              },
-            })
-
-            const data = await res.json()
+            const data = await fetchJsonWithFallback<any>(url)
+            
             if (!data || !data.priceInfo || !Number.isFinite(data.priceInfo.lastPrice)) return null
 
             return {
-              symbol, // Return the original symbol with .NS for UI consistency
+              symbol,
               price: Number(data.priceInfo.lastPrice),
               changePercent: Number(data.priceInfo.pChange) || 0,
             }
-          } catch {
+          } catch (err) {
+            console.warn(`NSE fetch failed for ${symbol}:`, err)
             return null
           }
         }
@@ -1436,31 +1416,31 @@ function App() {
         loadExchangeRate()
 
         const quotePromises = parsedStockSymbols.map(async (symbol): Promise<StockQuote | null> => {
-          const isInd = isIndianSymbol(symbol)
-
-          if (isInd) {
-            if (symbol.endsWith('.NS')) {
-              const nseResult = await fetchNseQuote(symbol)
-              if (nseResult) return nseResult
-            }
-            return fetchYahooQuote(symbol)
+          // If no suffix and looks like an Indian stock (standard letters), try .NS first
+          let targetSymbol = symbol
+          if (!symbol.includes('.')) {
+            targetSymbol = `${symbol}.NS`
           }
 
-          // Non-Indian symbol or missing suffix
-          // Try Finnhub first
+          const isInd = isIndianSymbol(targetSymbol)
+
+          if (isInd) {
+            // Priority 1: Direct NSE (via Proxy)
+            if (targetSymbol.endsWith('.NS')) {
+              const nseResult = await fetchNseQuote(targetSymbol)
+              if (nseResult) return nseResult
+            }
+            // Priority 2: Yahoo (via Proxy)
+            return fetchYahooQuote(targetSymbol)
+          }
+
+          // Non-Indian symbol logic
+          // Try Finnhub first (usually faster for US stocks)
           const finnhubResult = await fetchFinnhubQuote(symbol)
           if (finnhubResult) return finnhubResult
 
-          // Fallback 1: Yahoo as-is
-          const yahooResult = await fetchYahooQuote(symbol)
-          if (yahooResult) return yahooResult
-
-          // Fallback 2: Try appending .NS if it was a plain name (likely Indian)
-          if (!symbol.includes('.')) {
-            return fetchYahooQuote(`${symbol}.NS`)
-          }
-
-          return null
+          // Fallback: Yahoo
+          return fetchYahooQuote(symbol)
         })
 
         const results = await Promise.all(quotePromises)
@@ -3202,7 +3182,7 @@ function App() {
                         className="invest-back-btn"
                         onClick={() => setInvestmentView(null)}
                       >
-                        ← Back
+                        Back
                       </button>
                       <div>
                         <span className="eyebrow">Investment</span>

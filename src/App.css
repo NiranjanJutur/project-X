@@ -1616,16 +1616,33 @@
 .invest-back-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.45rem 0.85rem;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  gap: 0.5rem;
+  padding: 0.6rem 1.1rem;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.05);
-  color: var(--text-soft);
-  font: 600 0.82rem/1 var(--font-body);
+  backdrop-filter: blur(12px);
+  color: var(--text-main);
+  font: 700 0.88rem/1 var(--font-body);
   cursor: pointer;
-  white-space: nowrap;
-  transition: background 140ms ease, color 140ms ease;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  margin-bottom: 0.75rem;
+}
+
+.invest-back-btn::before {
+  content: '←';
+  font-size: 1.1rem;
+  margin-top: -1px;
+}
+
+.invest-back-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateX(-3px);
+}
+
+.invest-back-btn:active {
+  transform: scale(0.94) translateX(-3px);
 }
 
 
@@ -2419,15 +2436,28 @@
 
   .mobile-view-button.active {
     color: var(--sky) !important;
+    position: relative !important;
+  }
+
+  .mobile-view-button.active::after {
+    content: '';
+    position: absolute;
+    bottom: 6px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--sky);
+    box-shadow: 0 0 8px var(--sky);
   }
 
   .mobile-icon {
-    font-size: 1.25rem;
-    margin-bottom: 2px;
+    font-size: 1.35rem;
+    transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
   .mobile-view-button.active .mobile-icon {
-    filter: drop-shadow(0 0 8px rgba(115, 166, 255, 0.4));
+    transform: translateY(-2px) scale(1.1);
+    filter: drop-shadow(0 0 12px rgba(115, 166, 255, 0.6));
   }
 
   .mobile-view-button:nth-child(3) {
